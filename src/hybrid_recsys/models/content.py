@@ -25,6 +25,7 @@ class ContentBasedRecommender:
         self.item_features: csr_matrix | None = None
         self.movie_index: pd.Series | None = None
         self._movie_ids: np.ndarray | None = None
+        self._features_norm: np.ndarray | None = None
         self._sim_cache: OrderedDict = OrderedDict()
 
     def fit(self, item_features: csr_matrix, movie_index: pd.Series) -> "ContentBasedRecommender":
@@ -32,6 +33,17 @@ class ContentBasedRecommender:
         self.movie_index = movie_index
         self._movie_ids = movie_index.index.values
         self._sim_cache = OrderedDict()
+
+        # Densify + L2-normalize once. The item feature matrix is ~90% dense
+        # (genre block + TruncatedSVD output of TF-IDF) so storing it as CSR
+        # forces every similarity call onto scipy's sparse path, which has
+        # heavy per-call overhead. A dense float32 copy is ~70 MB and lets us
+        # use a single BLAS matmul (~3 ms) per similarity query instead of
+        # ~100 ms through the sparse path.
+        dense = item_features.toarray().astype(np.float32, copy=False)
+        norms = np.linalg.norm(dense, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        self._features_norm = dense / norms
         return self
 
     def _similar_items(self, movie_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -39,9 +51,14 @@ class ContentBasedRecommender:
             self._sim_cache.move_to_end(movie_id)
             return self._sim_cache[movie_id]
         pos = self.movie_index[movie_id]
-        sims = cosine_similarity(self.item_features[pos], self.item_features).flatten()
+        # Dense matmul over L2-normalized rows == cosine similarity.
+        sims = self._features_norm @ self._features_norm[pos]
         sims[pos] = 0.0  # exclude self
-        top_idx = np.argsort(sims)[::-1][: self.n_neighbors]
+        # argpartition is O(N); argsort is O(N log N). For n_neighbors=50
+        # over 62K items this is ~10x faster on the sort step alone.
+        k = min(self.n_neighbors, sims.shape[0] - 1)
+        cand = np.argpartition(-sims, k)[:k]
+        top_idx = cand[np.argsort(-sims[cand])]
         result = self._movie_ids[top_idx], sims[top_idx]
         self._sim_cache[movie_id] = result
         if len(self._sim_cache) > self.cache_max:

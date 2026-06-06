@@ -1,12 +1,12 @@
 # notebooks/
 
-Three notebooks that must be executed in order. Each saves its outputs so the
+Four notebooks that must be executed in order. Each saves its outputs so the
 next notebook can load them without re-computation.
 
 ## Execution order
 
 ```text
-01_eda.ipynb  →  02_features.ipynb  →  03_train_evaluate.ipynb
+01_eda.ipynb  →  02_features.ipynb  →  03_train.ipynb  →  04_evaluation.ipynb
 ```
 
 All notebooks add `../src` to `sys.path` so the `hybrid_recsys` package is
@@ -43,37 +43,44 @@ importable without a prior `pip install`.
 
 ---
 
-## 03_train_evaluate.ipynb — Model Training & Evaluation
+## 03_train.ipynb — Model Training
 
 **Reads:** `data/processed/*`, `data/processed/item_features.npz`  
-**Writes:** `artifacts/models/*.joblib`, `artifacts/metrics/all_metrics.json`  
-**Figures:** `artifacts/figures/08_*` through `10_*`
+**Writes:** `artifacts/models/*.joblib`
 
-Trains and evaluates eight models under a leak-free protocol:
+Fits and **persists** the six trainable models — no evaluation here:
 
 | Section | Model |
 |---|---|
-| §3 | Global Mean baseline |
-| §3 | Popularity baseline |
-| §4 | Content-Based (cosine similarity) |
-| §5 | User-Based k-NN |
-| §6 | Item-Based k-NN |
-| §7 | SVD (with 5-fold GridSearchCV hyperparameter tuning) |
-| §8 | Weighted Hybrid (α tuned on validation RMSE) |
-| §9 | Stacked Hybrid (Ridge meta-learner on 5-fold OOF predictions) |
+| §2 | Content-Based (cosine similarity) |
+| §3 | User-Based k-NN |
+| §4 | Item-Based k-NN |
+| §5 | SVD (with 5-fold GridSearchCV hyperparameter tuning) |
+| §6 | Weighted Hybrid (α tuned on validation RMSE) |
+| §7 | Stacked Hybrid (Ridge meta-learner on 5-fold OOF predictions) |
 
-Results are summarised in a styled DataFrame and three Plotly charts.
+> **Runtime note:** §5 (SVD grid search) and §7 (OOF stacking loop) are the
+> most compute-intensive — expect 20–60 minutes total on MovieLens 25M. Set
+> `OOF_SAMPLE_FRAC = 0.2` near the top of §7 for a faster (approximate) run.
 
-> **Runtime note:** Section §7 (SVD grid search) and §9 (OOF stacking loop)
-> are the most compute-intensive. On a modern laptop with MovieLens 25M, expect
-> 20–60 minutes total. Set `OOF_SAMPLE_FRAC = 0.2` near the top of §9 to reduce
-> the OOF training subset for a faster (approximate) run.
+---
+
+## 04_evaluation.ipynb — Model Evaluation
+
+**Reads:** `artifacts/models/*.joblib`, `data/processed/*`  
+**Writes:** `artifacts/metrics/all_metrics.json`  
+**Figures:** `artifacts/figures/08_*` through `10_*`
+
+Loads the trained models and scores all **eight** (the two naive baselines are
+recomputed inline) under a leak-free protocol: RMSE/MAE on the full test set, and
+Precision/Recall/F1@K via the sampled-negatives protocol. Results are summarised
+in a styled DataFrame and three Plotly charts.
 
 ---
 
 ## generate.py
 
-Developer utility that regenerates all three `.ipynb` files from source using
+Developer utility that regenerates all four `.ipynb` files from source using
 `nbformat`. Run from the project root:
 
 ```bash

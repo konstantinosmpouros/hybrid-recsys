@@ -37,7 +37,8 @@ knowledge_graphs_ass/
 ├── notebooks/
 │   ├── 01_eda.ipynb                 # exploratory data analysis & preprocessing
 │   ├── 02_features.ipynb            # item feature engineering
-│   └── 03_train_evaluate.ipynb      # model training & evaluation
+│   ├── 03_train.ipynb               # model training (fits & saves all models)
+│   └── 04_evaluation.ipynb          # model evaluation (RMSE/MAE/P/R/F1@K)
 ├── tests/
 │   ├── test_splits.py
 │   └── test_metrics.py
@@ -96,7 +97,7 @@ pip install -e .
 
 # 3. Run notebooks in order
 jupyter notebook
-#    01_eda.ipynb  →  02_features.ipynb  →  03_train_evaluate.ipynb
+#    01_eda.ipynb  →  02_features.ipynb  →  03_train.ipynb  →  04_evaluation.ipynb
 
 # 4. Launch the app
 streamlit run src/app/app.py

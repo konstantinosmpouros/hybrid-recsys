@@ -3,7 +3,7 @@ import pandas as pd
 import joblib
 from surprise import Dataset, Reader, SVD, KNNWithMeans
 from surprise.model_selection import GridSearchCV
-from ..config import ARTIFACTS_MODELS, RATING_SCALE
+from ..config import ARTIFACTS_MODELS, RATING_SCALE, RANDOM_STATE
 
 
 def _to_surprise(ratings_df: pd.DataFrame):
@@ -29,6 +29,13 @@ class SVDModel:
                 "lr_all": [0.002, 0.005],
                 "reg_all": [0.02, 0.05],
             }
+        # Pin the random_state on every grid candidate so the SVD factor
+        # initialisation is deterministic (otherwise Surprise seeds from the OS
+        # RNG and RMSE/MAE drift run-to-run). Copied so the caller's dict is
+        # left untouched; best_params then carries random_state into the OOF
+        # refits in notebook 03 as well.
+        param_grid = {**param_grid}
+        param_grid.setdefault("random_state", [RANDOM_STATE])
         data = _to_surprise(train_df)
         gs = GridSearchCV(SVD, param_grid, measures=["rmse", "mae"], cv=5, n_jobs=-1)
         gs.fit(data)

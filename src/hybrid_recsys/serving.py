@@ -30,12 +30,22 @@ class RecommenderBundle:
         return self
 
     def _predict_fn(self, model: str, user_id: int, user_ratings: dict[int, float]):
+        def stacked_predict(m):
+            base = np.array([
+                self.cb.predict(user_ratings, m),
+                self.user_knn.predict(user_id, m),
+                self.item_knn.predict(user_id, m),
+                self.svd.predict(user_id, m),
+            ], dtype=float)
+            return self.stacked.predict_one(user_id, m, base)
+
         dispatch = {
             "content":  lambda m: self.cb.predict(user_ratings, m),
             "svd":      lambda m: self.svd.predict(user_id, m),
             "item_knn": lambda m: self.item_knn.predict(user_id, m),
             "user_knn": lambda m: self.user_knn.predict(user_id, m),
             "weighted": lambda m: self.weighted.predict(user_id, m, user_ratings),
+            "stacked":  stacked_predict,
         }
         if model not in dispatch:
             raise ValueError(f"Unknown model '{model}'. Choose from {list(dispatch)}")

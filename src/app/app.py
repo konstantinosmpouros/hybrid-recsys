@@ -67,9 +67,10 @@ with tab_existing:
         with col2:
             model_choice = st.selectbox(
                 "Model",
-                ["weighted", "svd", "content", "item_knn", "user_knn"],
+                ["weighted", "stacked", "svd", "content", "item_knn", "user_knn"],
                 format_func=lambda x: {
                     "weighted":  "Weighted Hybrid",
+                    "stacked":   "Stacked Hybrid",
                     "svd":       "SVD (Matrix Factorization)",
                     "content":   "Content-Based",
                     "item_knn":  "Item-Based k-NN",
@@ -167,7 +168,7 @@ with tab_compare:
         metrics = bundle.load_metrics()
 
         if not metrics:
-            st.info("No evaluation metrics found yet. Run notebook `03_train_evaluate.ipynb` first.")
+            st.info("No evaluation metrics found yet. Run `03_train.ipynb` then `04_evaluation.ipynb` first.")
         else:
             # Rating prediction table
             st.subheader("Rating Prediction")

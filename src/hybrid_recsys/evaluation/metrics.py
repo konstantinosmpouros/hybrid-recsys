@@ -37,6 +37,7 @@ def evaluate_ranking(
     train_val_df: pd.DataFrame,
     k_values: list[int] | None = None,
     threshold: float | None = None,
+    random_state: int = 42,
 ) -> dict[int, dict[str, float]]:
     """Macro-averaged Precision@K, Recall@K, F1@K over all users in test_df.
 
@@ -54,12 +55,19 @@ def evaluate_ranking(
         .to_dict()
     )
     all_movies = test_df["movieId"].unique()
+    base_rng = np.random.default_rng(random_state)
 
-    accum = {k: {"precision": [], "recall": [], "f1": []} for k in k_values}
+    accum = {k: {"precision": [], "recall": []} for k in k_values}
 
     for user_id, relevant in relevant_items.items():
         user_seen = seen_items.get(user_id, set())
-        candidates = [m for m in all_movies if m not in user_seen]
+        candidates = np.array([m for m in all_movies if m not in user_seen])
+        if len(candidates) == 0:
+            continue
+        # Random tie-break so constant-output models don't ride the original
+        # candidate ordering through the stable sort (see evaluate_ranking_sampled).
+        user_rng = np.random.default_rng(base_rng.integers(0, 2**32 - 1) ^ int(user_id))
+        user_rng.shuffle(candidates)
 
         scored = [(m, predict_fn(user_id, m)) for m in candidates]
         scored = [(m, s) for m, s in scored if not np.isnan(s)]
@@ -67,20 +75,16 @@ def evaluate_ranking(
 
         for k in k_values:
             top_k = [m for m, _ in scored[:k]]
-            p = precision_at_k(top_k, relevant)
-            r = recall_at_k(top_k, relevant)
-            accum[k]["precision"].append(p)
-            accum[k]["recall"].append(r)
-            accum[k]["f1"].append(f1_at_k(p, r))
+            accum[k]["precision"].append(precision_at_k(top_k, relevant))
+            accum[k]["recall"].append(recall_at_k(top_k, relevant))
 
-    return {
-        k: {
-            "precision": float(np.mean(v["precision"])),
-            "recall": float(np.mean(v["recall"])),
-            "f1": float(np.mean(v["f1"])),
-        }
-        for k, v in accum.items()
-    }
+    # F1 from macro-averaged P and R (kept consistent — F1 lies between P and R).
+    result = {}
+    for k, v in accum.items():
+        p = float(np.mean(v["precision"])) if v["precision"] else 0.0
+        r = float(np.mean(v["recall"])) if v["recall"] else 0.0
+        result[k] = {"precision": p, "recall": r, "f1": f1_at_k(p, r)}
+    return result
 
 
 def evaluate_rating_prediction(true: np.ndarray, pred: np.ndarray) -> dict[str, float]:
@@ -122,7 +126,7 @@ def evaluate_ranking_sampled(
     all_movie_ids = np.asarray(all_movie_ids)
     base_rng = np.random.default_rng(random_state)
 
-    accum = {k: {"precision": [], "recall": [], "f1": []} for k in k_values}
+    accum = {k: {"precision": [], "recall": []} for k in k_values}
 
     for user_id, relevant in relevant_items.items():
         if not relevant:
@@ -136,24 +140,28 @@ def evaluate_ranking_sampled(
         user_rng = np.random.default_rng(base_rng.integers(0, 2**32 - 1) ^ int(user_id))
         negatives = user_rng.choice(pool, size=size, replace=False)
 
-        candidates = list(relevant) + list(negatives)
+        # Shuffle the candidate pool so that tied predictions break *randomly*.
+        # Otherwise a constant-output model (e.g. Global Mean) keeps the original
+        # relevant-first ordering through the stable sort and scores artificially
+        # high precision/recall.
+        candidates = np.array(list(relevant) + list(negatives))
+        user_rng.shuffle(candidates)
+
         scored = [(m, predict_fn(user_id, m)) for m in candidates]
         scored = [(m, s) for m, s in scored if not np.isnan(s)]
         scored.sort(key=lambda x: x[1], reverse=True)
 
         for k in k_values:
             top_k = [m for m, _ in scored[:k]]
-            p = precision_at_k(top_k, relevant)
-            r = recall_at_k(top_k, relevant)
-            accum[k]["precision"].append(p)
-            accum[k]["recall"].append(r)
-            accum[k]["f1"].append(f1_at_k(p, r))
+            accum[k]["precision"].append(precision_at_k(top_k, relevant))
+            accum[k]["recall"].append(recall_at_k(top_k, relevant))
 
-    return {
-        k: {
-            "precision": float(np.mean(v["precision"])) if v["precision"] else 0.0,
-            "recall":    float(np.mean(v["recall"]))    if v["recall"]    else 0.0,
-            "f1":        float(np.mean(v["f1"]))        if v["f1"]        else 0.0,
-        }
-        for k, v in accum.items()
-    }
+    # F1 is computed from the macro-averaged precision and recall so the three
+    # numbers stay mutually consistent (F1 always lies between P and R). This
+    # differs from averaging per-user F1, which can fall below both P and R.
+    result = {}
+    for k, v in accum.items():
+        p = float(np.mean(v["precision"])) if v["precision"] else 0.0
+        r = float(np.mean(v["recall"])) if v["recall"] else 0.0
+        result[k] = {"precision": p, "recall": r, "f1": f1_at_k(p, r)}
+    return result

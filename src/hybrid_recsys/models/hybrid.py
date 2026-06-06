@@ -75,6 +75,25 @@ class StackedHybrid:
 
     def __init__(self, alpha: float = 1.0):
         self.meta = Ridge(alpha=alpha, random_state=42)
+        # Side features attached at training time so serving doesn't need
+        # to re-load the training data to score a (user, movie) pair.
+        self.item_popularity: dict = {}
+        self.user_count: dict = {}
+        self.item_count: dict = {}
+        self.global_mean: float = 3.5
+
+    def set_side_features(
+        self,
+        item_popularity: dict,
+        user_count: dict,
+        item_count: dict,
+        global_mean: float,
+    ) -> "StackedHybrid":
+        self.item_popularity = item_popularity
+        self.user_count = user_count
+        self.item_count = item_count
+        self.global_mean = float(global_mean)
+        return self
 
     def fit(self, X_meta: np.ndarray, y: np.ndarray) -> "StackedHybrid":
         self.meta.fit(X_meta, y)
@@ -82,6 +101,23 @@ class StackedHybrid:
 
     def predict(self, X_meta: np.ndarray) -> np.ndarray:
         return np.clip(self.meta.predict(X_meta), 0.5, 5.0)
+
+    def predict_one(self, user_id, movie_id, base_preds: np.ndarray) -> float:
+        """Score a single (user, movie) given the 4 base-model predictions.
+
+        Used at serving time so the bundle doesn't need to keep the training
+        DataFrame in memory. `base_preds` must be ordered [cb, user_knn,
+        item_knn, svd]. Returns global_mean if any base prediction is NaN.
+        """
+        if np.isnan(base_preds).any():
+            return float(self.global_mean)
+        X = np.array([[
+            *base_preds,
+            self.item_popularity.get(movie_id, 0),
+            self.user_count.get(user_id, 0),
+            self.item_count.get(movie_id, 0),
+        ]], dtype=float)
+        return float(self.predict(X)[0])
 
     def save(self) -> None:
         ARTIFACTS_MODELS.mkdir(parents=True, exist_ok=True)

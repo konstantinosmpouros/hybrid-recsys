@@ -31,11 +31,13 @@ notebooks/.ipynb_checkpoints/
 
 # Claude Code
 CLAUDE.md
+.claude/
 
 # IDE
 .vscode/*
 .virtual_documents/*
 .idea/*
+TODO
 
 # OS
 .DS_Store
