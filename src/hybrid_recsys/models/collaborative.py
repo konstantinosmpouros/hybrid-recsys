@@ -33,7 +33,7 @@ class SVDModel:
         # initialisation is deterministic (otherwise Surprise seeds from the OS
         # RNG and RMSE/MAE drift run-to-run). Copied so the caller's dict is
         # left untouched; best_params then carries random_state into the OOF
-        # refits in notebook 03 as well.
+        # refits in the stacked-hybrid notebook (OOF folds) as well.
         param_grid = {**param_grid}
         param_grid.setdefault("random_state", [RANDOM_STATE])
         data = _to_surprise(train_df)

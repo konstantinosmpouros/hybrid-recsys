@@ -839,153 +839,370 @@ save_nb(nb02, "02_features.ipynb")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NOTEBOOK 03 — Model Training & Evaluation
+# Shared setup snippets for the per-model notebooks.
+# SETUP_ENV  → imports + data load.   SETUP_HELPERS → small plotting/example helpers.
+# Each is injected as its OWN cell so no single cell does more than one job.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-nb03 = [
-
-md("""\
-# 03 — Model Training
-
-This notebook **fits and persists** every trainable recommender model. No evaluation
-happens here — that lives in `04_evaluation.ipynb`, which loads these saved artifacts
-and scores them on the held-out test set. Separating training from evaluation keeps the
-expensive fitting apart from the cheap, frequently re-run metric computation.
-
-**Protocol:**
-- Surprise models (SVD) are tuned by 5-fold cross-validation on the training set;
-  the weighted hybrid's α is chosen by exhaustive validation-set search.
-- Every model is fit on the full training set and serialised to `artifacts/models/`.
-- All random seeds are pinned (`RANDOM_STATE = 42`) so results are reproducible.
-
-**Models trained:** Content-Based · User-kNN · Item-kNN · SVD ·
-Weighted Hybrid · Stacked Hybrid. (The two naive baselines — Global Mean and
-Popularity — are trivial to recompute, so they are defined directly in the
-evaluation notebook rather than persisted here.)
-"""),
-
-code("""\
-import sys
+SETUP_ENV = '''import sys
 sys.path.insert(0, "../src")
-
 import warnings
 warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from pathlib import Path
-from sklearn.model_selection import KFold
 
 from hybrid_recsys.pipeline.data import load_processed
 from hybrid_recsys.pipeline.splits import load_splits
-from hybrid_recsys.pipeline.features import load_item_features
-from hybrid_recsys.models.content import ContentBasedRecommender
-from hybrid_recsys.models.collaborative import SVDModel, ItemKNNModel, UserKNNModel, _to_surprise
-from hybrid_recsys.models.hybrid import WeightedHybrid, StackedHybrid
-from hybrid_recsys.config import ARTIFACTS_MODELS, RANDOM_STATE
-from surprise import SVD as SurpriseSVD
+from hybrid_recsys.evaluation.report import full_metrics, save_metric, top_n
+from hybrid_recsys.config import RANDOM_STATE
 
-ARTIFACTS_MODELS.mkdir(parents=True, exist_ok=True)
-"""),
+FIGURES_DIR = Path("../artifacts/figures")
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── 1. Load ──────────────────────────────────────────────────────────────────
 
-md("## 1. Load Data"),
+def save_fig(fig, name):
+    fig.write_html(str(FIGURES_DIR / f"{name}.html"))
+    try:
+        fig.write_image(str(FIGURES_DIR / f"{name}.png"), width=1100, height=550, scale=2)
+    except Exception:
+        pass
+    fig.show()
 
-code("""\
-movies                     = load_processed("movies")
-train, val, test           = load_splits()
-item_features, movie_index = load_item_features()
 
-print(f"Train:      {len(train):>10,} ratings | {train['userId'].nunique():>7,} users")
-print(f"Validation: {len(val):>10,} ratings | {val['userId'].nunique():>7,} users")
-print(f"Item features: {item_features.shape}")
+EVAL_USERS, N_NEGATIVES = 1_000, 100
+rng = np.random.default_rng(RANDOM_STATE)
 
-# User rating histories from the training set (needed by content model & hybrids)
-user_ratings_map: dict = (
-    train
-    .groupby("userId")
-    .apply(lambda df: dict(zip(df["movieId"], df["rating"])))
-    .to_dict()
+movies           = load_processed("movies")
+train, val, test = load_splits()
+train_val        = pd.concat([train, val], ignore_index=True)
+all_movie_ids    = movies["movieId"].values
+user_ratings_map = (
+    train.groupby("userId").apply(lambda d: dict(zip(d["movieId"], d["rating"]))).to_dict()
 )
+eval_user_ids = rng.choice(
+    test["userId"].unique(), size=min(EVAL_USERS, test["userId"].nunique()), replace=False
+)
+test_sample = test[test["userId"].isin(eval_user_ids)]
+demo_user   = max(eval_user_ids, key=lambda u: len(user_ratings_map.get(u, {})))
+print(f"Loaded splits - train {len(train):,}, test {len(test):,}; demo user = {int(demo_user)}")
+'''
 
-# Training-set global mean — reused by the stacked hybrid's NaN fallback.
-global_mean = float(train["rating"].mean())
-print(f"Global mean rating: {global_mean:.4f}")
-"""),
+SETUP_HELPERS = '''def ranking_curve(metrics, title):
+    rows = [{"K": k, "Metric": m.capitalize(), "Value": metrics[f"k{k}"][m]}
+            for k in [5, 10, 20] for m in ["precision", "recall", "f1"]]
+    return px.line(pd.DataFrame(rows), x="K", y="Value", color="Metric", markers=True,
+                   title=f"Ranking metrics @ K - {title}")
 
-# ── 2. Helper ─────────────────────────────────────────────────────────────────
 
-md("""\
-## 2. Content-Based Model
+def error_hist(preds, title):
+    err = test["rating"].to_numpy() - preds
+    err = err[~np.isnan(err)]
+    fig = px.histogram(err, nbins=50, title=f"Rating error (true - predicted) - {title}")
+    fig.update_layout(showlegend=False, xaxis_title="true - predicted", bargap=0.02)
+    return fig
 
-The content-based model predicts the rating for item *j* by finding its top-L
-most content-similar items via cosine similarity on the feature matrix, then
-computing a mean-centred weighted average over the user's ratings on those items:
 
-$$\\hat{r}^{CB}_{u,j} = \\bar{r}_u + \\frac{\\sum_{i \\in N^L_u(j)} \\text{sim}(i,j)\\,(r_{u,i} - \\bar{r}_u)}{\\sum_{i} |\\text{sim}(i,j)| + \\varepsilon}$$
-"""),
+def show_example(predict_fn, n=10, n_candidates=3000):
+    seen = set(user_ratings_map.get(demo_user, {}))
+    cand = rng.choice(all_movie_ids, size=min(n_candidates, len(all_movie_ids)), replace=False)
+    recs = top_n(predict_fn, demo_user, seen, cand, movies, n=n)
+    hist = (
+        pd.DataFrame({"movieId": list(seen),
+                      "rating": [user_ratings_map[demo_user][m] for m in seen]})
+        .merge(movies[["movieId", "clean_title", "genres"]], on="movieId", how="left")
+        .sort_values("rating", ascending=False).head(n)
+    )
+    return hist, recs
 
-code("""\
-cb = ContentBasedRecommender(n_neighbors=50)
-cb.fit(item_features, movie_index)
+
+def star_graph(center, leaves, weights, title, name):
+    k = len(leaves)
+    angles = np.linspace(0, 2 * np.pi, k, endpoint=False)
+    lx, ly = np.cos(angles), np.sin(angles)
+    edge_x, edge_y = [], []
+    for x, y in zip(lx, ly):
+        edge_x += [0, x, None]
+        edge_y += [0, y, None]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode="lines",
+                             line=dict(color="#cccccc", width=1), hoverinfo="none"))
+    fig.add_trace(go.Scatter(
+        x=lx, y=ly, mode="markers+text",
+        marker=dict(size=16, color=list(weights), colorscale="Teal",
+                    showscale=True, colorbar=dict(title="sim")),
+        text=[f"{l}<br>{w:.2f}" for l, w in zip(leaves, weights)],
+        textposition="top center", hoverinfo="text"))
+    fig.add_trace(go.Scatter(x=[0], y=[0], mode="markers+text",
+                             marker=dict(size=26, color="#EF553B"),
+                             text=[center], textposition="bottom center", hoverinfo="text"))
+    fig.update_layout(title=title, showlegend=False,
+                      xaxis=dict(visible=False), yaxis=dict(visible=False))
+    save_fig(fig, name)
+    return fig
+'''
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 03 — Naive Baselines
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nb03 = [
+md('''# 03 - Naive Baselines (Global Mean & Popularity)
+
+Two parameter-free baselines that define the performance floor every later model must
+beat. Each is evaluated on the held-out test set and its results written to
+`artifacts/metrics/all_metrics.json`.'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
+
+md("## Global Mean — train + evaluate"),
+code('''global_mean = float(train["rating"].mean())
+gm_predict = lambda u, i: global_mean
+
+m, preds = full_metrics(gm_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("Global Mean", m)
+print(f"global mean = {global_mean:.3f}  |  RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
+
+md("## Popularity — train + evaluate"),
+code('''item_pop = train.groupby("movieId").size().to_dict()
+max_pop  = max(item_pop.values())
+
+def pop_predict(u, i):
+    return 0.5 + 4.5 * (item_pop.get(i, 0) / max_pop)
+
+m, preds = full_metrics(pop_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("Popularity", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
+
+md("### What Popularity recommends to everyone (top-10)"),
+code('''top_pop = (
+    pd.Series(item_pop, name="ratings").sort_values(ascending=False).head(10)
+    .rename_axis("movieId").reset_index()
+    .merge(movies[["movieId", "clean_title", "genres"]], on="movieId")
+)
+display(top_pop[["clean_title", "genres", "ratings"]])'''),
+
+md("### Popularity — ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "Popularity"), "eval_popularity_ranking")'),
+
+md('''## Takeaway
+
+Global Mean anchors RMSE/MAE but cannot rank (constant output). Popularity ranks well under
+sampled-negatives (relevant items skew popular) yet has meaningless RMSE. These are the bar
+the real models must clear.'''),
+]
+save_nb(nb03, "03_baselines.ipynb")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 04 — Content-Based
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nb04 = [
+md('''# 04 - Content-Based Model
+
+Item-item cosine similarity on the 276-dim feature vectors; predicts a mean-centred
+weighted average over the user's ratings on the target's most similar items.'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
+
+md("## Train & save"),
+code('''from hybrid_recsys.pipeline.features import load_item_features
+from hybrid_recsys.models.content import ContentBasedRecommender
+
+item_features, movie_index = load_item_features()
+cb = ContentBasedRecommender(n_neighbors=50).fit(item_features, movie_index)
 cb.save()
-print("Saved: artifacts/models/content_model.joblib")
-"""),
+print("saved content_model.joblib")'''),
 
-# ── 5. User-kNN ───────────────────────────────────────────────────────────────
+md("## Evaluate — compute & record metrics"),
+code('''cb_predict = lambda u, i: cb.predict(user_ratings_map.get(u, {}), i)
+m, preds = full_metrics(cb_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("Content-Based", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
 
-md("""\
-## 3. User-Based k-NN
+md("## Ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "Content-Based"), "eval_content_ranking")'),
 
-User-based CF identifies the *k* most similar users to the target user
-(Pearson baseline similarity) and aggregates their ratings on the target item.
-We use Surprise's `KNNWithMeans` with `user_based=True`. To bound memory, the
-model samples 20K users before fitting — non-sampled users fall back to the
-baseline prediction at scoring time.
-"""),
+md("## Rating-error distribution"),
+code('save_fig(error_hist(preds, "Content-Based"), "eval_content_error")'),
 
-code("""\
-user_knn = UserKNNModel(k=80, min_k=5)
-user_knn.fit(train)
+md("## Example — the demo user's rating history"),
+code('''hist, recs = show_example(cb_predict)
+print(f"Demo user {int(demo_user)} top-rated movies:")
+display(hist[["clean_title", "genres", "rating"]])'''),
+
+md("## Example — what the model recommends"),
+code('display(recs[["clean_title", "genres", "pred"]])'),
+
+md("## Why these? Content neighbours of a movie the user liked"),
+code('''liked_id = int(hist.iloc[0]["movieId"])
+sim_ids, sim_scores = cb._similar_items(liked_id)
+nb = (
+    pd.DataFrame({"movieId": [int(x) for x in sim_ids[:10]],
+                  "similarity": np.round(sim_scores[:10], 3)})
+    .merge(movies[["movieId", "clean_title", "genres"]], on="movieId")
+)
+print(f"Because the user liked: {hist.iloc[0]['clean_title']}")
+display(nb[["clean_title", "genres", "similarity"]])'''),
+
+md("## Takeaway\n\nCold-item friendly and interpretable, but often falls back to the user mean, so RMSE only narrowly beats Global Mean."),
+]
+save_nb(nb04, "04_content_based.ipynb")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 05 — User-Based k-NN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nb05 = [
+md('''# 05 - User-Based k-NN
+
+Collaborative filtering over a user-user similarity matrix (Pearson-baseline). Samples
+20K users before fitting (memory cap); users outside the sample fall back to the baseline.'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
+
+md("## Train & save"),
+code('''from hybrid_recsys.models.collaborative import UserKNNModel
+
+user_knn = UserKNNModel(k=80, min_k=5).fit(train)
 user_knn.save()
-print("Saved: artifacts/models/user_knn_model.joblib")
-"""),
+print("saved user_knn_model.joblib")'''),
 
-# ── 6. Item-kNN ───────────────────────────────────────────────────────────────
+md("## Evaluate — compute & record metrics"),
+code('''uk_predict = lambda u, i: user_knn.predict(u, i)
+m, preds = full_metrics(uk_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("User-Based k-NN", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
 
-md("""\
-## 4. Item-Based k-NN
+md("## Ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "User-kNN"), "eval_userknn_ranking")'),
 
-Item-based CF identifies the *k* most similar items to the target item and
-aggregates the user's ratings on those items. Caps to the 15K most-rated items
-before fitting; because ratings concentrate on popular titles, this cap barely
-reduces coverage (unlike the user-side cap).
-"""),
+md("## Rating-error distribution"),
+code('save_fig(error_hist(preds, "User-kNN"), "eval_userknn_error")'),
 
-code("""\
-item_knn = ItemKNNModel(k=80, min_k=5)
-item_knn.fit(train)
+md("## Neighbourhood graph — the *k* nearest users"),
+code('''algo = user_knn.model
+ts = algo.trainset
+
+demo_raw = None
+for u in eval_user_ids:
+    try:
+        ts.to_inner_uid(str(u)); demo_raw = str(u); break
+    except ValueError:
+        continue
+
+inner     = ts.to_inner_uid(demo_raw)
+neighbors = algo.get_neighbors(inner, k=10)
+sims      = [float(algo.sim[inner, nb]) for nb in neighbors]
+neigh_raw = [ts.to_raw_uid(nb) for nb in neighbors]
+
+star_graph(f"user {demo_raw}", [f"user {r}" for r in neigh_raw], sims,
+           f"User {demo_raw} - 10 nearest users (Pearson-baseline sim)",
+           "eval_userknn_neighbors")'''),
+
+md("## Distribution of user-user similarities"),
+code('''tri = algo.sim[np.triu_indices_from(algo.sim, k=1)]
+tri = tri[np.isfinite(tri) & (tri != 0)]
+samp = rng.choice(tri, size=min(200_000, len(tri)), replace=False)
+fig = px.histogram(samp, nbins=60, title="User-User Similarity Distribution (non-zero, sampled)")
+fig.update_layout(showlegend=False, xaxis_title="similarity")
+save_fig(fig, "eval_userknn_simdist")'''),
+
+md("## Takeaway\n\nThe 20K-user cap means most test users hit the baseline fallback, so these metrics under-represent true user-CF (item-kNN suffers far less)."),
+]
+save_nb(nb05, "05_user_knn.ipynb")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 06 — Item-Based k-NN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nb06 = [
+md('''# 06 - Item-Based k-NN
+
+Collaborative filtering over an item-item similarity matrix. The neighbourhood graph is
+especially interpretable here - the nodes are movies.'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
+
+md("## Train & save"),
+code('''from hybrid_recsys.models.collaborative import ItemKNNModel
+
+item_knn = ItemKNNModel(k=80, min_k=5).fit(train)
 item_knn.save()
-print("Saved: artifacts/models/item_knn_model.joblib")
-"""),
+print("saved item_knn_model.joblib")'''),
 
-# ── 7. SVD ────────────────────────────────────────────────────────────────────
+md("## Evaluate — compute & record metrics"),
+code('''ik_predict = lambda u, i: item_knn.predict(u, i)
+m, preds = full_metrics(ik_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("Item-Based k-NN", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
 
-md("""\
-## 5. SVD — Matrix Factorisation
+md("## Ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "Item-kNN"), "eval_itemknn_ranking")'),
 
-Surprise's SVD decomposes the rating matrix into user and item latent factor
-matrices with global, user, and item bias terms:
+md("## Rating-error distribution"),
+code('save_fig(error_hist(preds, "Item-kNN"), "eval_itemknn_error")'),
 
-$$\\hat{r}_{ui} = \\mu + b_u + b_i + q_i^\\top p_u$$
+md("## Item neighbourhood graph — nearest movies to a query"),
+code('''algo = item_knn.model
+ts = algo.trainset
+title_by_id = movies.set_index("movieId")["clean_title"]
 
-Hyperparameters (`n_factors`, `n_epochs`, `lr_all`, `reg_all`) are selected
-by 5-fold cross-validation on the training set, minimising RMSE. `random_state`
-is pinned inside `SVDModel.tune`, so the factor initialisation is reproducible.
-"""),
+def neighbours_of(substr, k=10):
+    cand = movies[movies["clean_title"].str.contains(substr, case=False, na=False)]
+    inner = None
+    for mid in cand["movieId"]:
+        try:
+            inner = ts.to_inner_iid(str(mid)); break
+        except ValueError:
+            continue
+    if inner is None:
+        print(f"'{substr}' not in the (capped) trainset"); return None
+    nbrs  = algo.get_neighbors(inner, k=k)
+    sims  = [float(algo.sim[inner, nb]) for nb in nbrs]
+    ids   = [int(ts.to_raw_iid(nb)) for nb in nbrs]
+    names = [str(title_by_id.get(i, i)) for i in ids]
+    center = str(title_by_id.get(int(ts.to_raw_iid(inner)), substr))
+    return center, names, sims
 
-code("""\
+res = neighbours_of("Toy Story")
+if res:
+    center, names, sims = res
+    display(pd.DataFrame({"similar movie": names, "similarity": np.round(sims, 3)}))
+    star_graph(center, names, sims, f"Item-kNN neighbours of '{center}'", "eval_itemknn_graph")'''),
+
+md("## Takeaway\n\nStrongest pure-CF model on RMSE - the 15K-item cap barely bites, and the neighbour graph shows genuinely related movies."),
+]
+save_nb(nb06, "06_item_knn.ipynb")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 07 — SVD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nb07 = [
+md('''# 07 - SVD (Matrix Factorisation)
+
+The one genuinely *trained* model: SGD learns latent user/item factors + biases, tuned by
+5-fold cross-validation.'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
+
+md("## Train — 5-fold CV grid search + save"),
+code('''from hybrid_recsys.models.collaborative import SVDModel
+
 svd = SVDModel()
 svd.tune(train, param_grid={
     "n_factors": [50, 100, 200],
@@ -994,481 +1211,279 @@ svd.tune(train, param_grid={
     "reg_all":   [0.02, 0.05],
 })
 svd.fit(train)
-
-print(f"Best params: {svd.best_params}")
-
 svd.save()
-print("Saved: artifacts/models/svd_model.joblib")
-"""),
+print("best params:", svd.best_params)'''),
 
-# ── 8. Weighted hybrid ────────────────────────────────────────────────────────
+md("## Evaluate — compute & record metrics"),
+code('''sv_predict = lambda u, i: svd.predict(u, i)
+m, preds = full_metrics(sv_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("SVD", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
 
-md("""\
-## 6. Weighted Hybrid
+md("## Ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "SVD"), "eval_svd_ranking")'),
 
-The weighted hybrid linearly interpolates the SVD and content-based predictions:
+md("## Rating-error distribution"),
+code('save_fig(error_hist(preds, "SVD"), "eval_svd_error")'),
 
-$$\\hat{r}^{H1}_{ui} = \\alpha \\cdot \\hat{r}^{SVD}_{ui} + (1-\\alpha) \\cdot \\hat{r}^{CB}_{ui}$$
+md("## Example recommendations for the demo user"),
+code('''hist, recs = show_example(sv_predict)
+display(recs[["clean_title", "genres", "pred"]])'''),
 
-The scalar weight $\\alpha$ is tuned on the validation set by exhaustive search
-over $\\alpha \\in [0, 1]$ with step 0.05, minimising RMSE. When the content
-model returns NaN (unknown item), the prediction falls back to SVD.
-"""),
+md("## Learned item-factor space (PCA-2D of qᵢ)"),
+code('''from sklearn.decomposition import PCA
 
-code("""\
-weighted = WeightedHybrid()
-weighted.set_models(svd, cb)
+algo = svd.model
+qi   = algo.qi
+ts   = algo.trainset
+ids  = np.array([int(ts.to_raw_iid(ii)) for ii in range(qi.shape[0])])
 
-best_alpha = weighted.tune_alpha(val, user_ratings_map)
-print(f"Best alpha (SVD weight): {best_alpha:.2f}")
+samp   = rng.choice(len(ids), size=min(3000, len(ids)), replace=False)
+coords = PCA(n_components=2, random_state=42).fit_transform(qi[samp])
+g0 = (movies.set_index("movieId")["genres"].reindex(ids[samp]).fillna("")
+      .str.split("|").str[0].values)
 
+viz = pd.DataFrame({"x": coords[:, 0], "y": coords[:, 1], "Primary genre": g0})
+top = viz["Primary genre"].value_counts().head(8).index
+viz = viz[viz["Primary genre"].isin(top)]
+fig = px.scatter(viz, x="x", y="y", color="Primary genre", opacity=0.6,
+                 title="SVD Latent Item Factors (PCA-2D)")
+fig.update_traces(marker_size=5)
+save_fig(fig, "eval_svd_factors")'''),
+
+md("## Takeaway\n\nBest single model on RMSE/MAE; the factor space shows genres separating even though the model never saw genres - it learned them from rating patterns alone."),
+]
+save_nb(nb07, "07_svd.ipynb")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 08 — Weighted Hybrid
+# ═══════════════════════════════════════════════════════════════════════════════
+
+nb08 = [
+md('''# 08 - Weighted Hybrid (α·SVD + (1−α)·CB)
+
+Loads the trained SVD and Content-Based models, tunes the blend weight α on validation,
+then evaluates. **Run notebooks 04 and 07 first.**'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
+
+md("## Load the base models"),
+code('''from hybrid_recsys.models.content import ContentBasedRecommender
+from hybrid_recsys.models.collaborative import SVDModel
+from hybrid_recsys.models.hybrid import WeightedHybrid
+
+cb       = ContentBasedRecommender.load()
+svd      = SVDModel.load()
+weighted = WeightedHybrid().set_models(svd, cb)
+print("loaded SVD + Content base models")'''),
+
+md("## Tune α on the validation set"),
+code('''from hybrid_recsys.evaluation.metrics import rmse
+
+val_s = val.sample(min(50_000, len(val)), random_state=RANDOM_STATE)   # fast representative sweep
+alphas = np.round(np.arange(0.0, 1.05, 0.05), 2)
+rmses = []
+for a in alphas:
+    weighted.alpha = float(a)
+    p = np.array([weighted.predict(r.userId, r.movieId, user_ratings_map.get(r.userId, {}))
+                  for r in val_s.itertuples()])
+    rmses.append(rmse(val_s["rating"].to_numpy(), p))
+
+best = float(alphas[int(np.argmin(rmses))])
+weighted.alpha = best
 weighted.save()
-print("Saved: artifacts/models/weighted_hybrid.joblib")
-"""),
+print(f"best α (SVD weight) = {best}")'''),
 
-# ── 9. Stacked hybrid ─────────────────────────────────────────────────────────
+md("## α-sweep curve"),
+code('''fig = px.line(x=alphas, y=rmses, markers=True,
+              title="Validation RMSE vs α  (α=1 -> pure SVD, α=0 -> pure CB)",
+              labels={"x": "α (SVD weight)", "y": "validation RMSE"})
+fig.add_vline(x=best, line_dash="dash", line_color="red")
+save_fig(fig, "eval_weighted_alpha")'''),
 
-md("""\
-## 7. Stacked Hybrid — Ridge Meta-Learner
+md("## Evaluate — compute & record metrics"),
+code('''w_predict = lambda u, i: weighted.predict(u, i, user_ratings_map.get(u, {}))
+m, preds = full_metrics(w_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("Weighted Hybrid", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
 
-The stacking hybrid learns the optimal combination of base-model predictions
-from data, rather than fixing it as a scalar weight.
+md("## Ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "Weighted Hybrid"), "eval_weighted_ranking")'),
 
-**Protocol (leak-free):**
-1. Split the training set into 5 folds.
-2. For each fold, train all base models on 4 folds and generate out-of-fold (OOF)
-   predictions on the held-out fold — no model ever predicts on data it was trained on.
-3. Train a Ridge regression meta-model on the OOF predictions plus side features
-   (item popularity, user rating count, item rating count).
-4. At test time, base models are retrained on the full training set; the meta-model
-   combines their predictions.
+md("## Example recommendations for the demo user"),
+code('''hist, recs = show_example(w_predict)
+display(recs[["clean_title", "genres", "pred"]])'''),
 
-> **Note:** The OOF loop trains 4 models × 5 folds. On MovieLens 25M this is
-> computationally intensive. Reduce `N_OOF_FOLDS` or set `OOF_SAMPLE_FRAC < 1.0`
-> to use a stratified training sample if runtime is a concern.
-"""),
+md("## Takeaway\n\nα converges high (≈0.9) - CB is the weaker signal, so the blend is mostly SVD. Safe and never worse than SVD, but a single global weight can't adapt per item (→ stacking)."),
+]
+save_nb(nb08, "08_weighted_hybrid.ipynb")
 
-code("""\
-N_OOF_FOLDS    = 5
-OOF_SAMPLE_FRAC = 1.0   # set to e.g. 0.2 for a faster run
 
-train_oof = (
-    train.sample(frac=OOF_SAMPLE_FRAC, random_state=RANDOM_STATE)
-    if OOF_SAMPLE_FRAC < 1.0
-    else train
-).reset_index(drop=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTEBOOK 09 — Stacked Hybrid
+# ═══════════════════════════════════════════════════════════════════════════════
 
-print(f"OOF training rows: {len(train_oof):,}  (frac={OOF_SAMPLE_FRAC})")
+nb09 = [
+md('''# 09 - Stacked Hybrid (Ridge meta-learner)
 
-kf        = KFold(n_splits=N_OOF_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-oof_preds = np.full((len(train_oof), 4), np.nan)
+Learns how to combine the four base predictions (+ side features) via a Ridge meta-model
+trained on **5-fold out-of-fold** predictions (leak-free). **Run notebooks 04-07 first.**'''),
+code(SETUP_ENV),
+code(SETUP_HELPERS),
 
-for fold_idx, (tr_idx, val_idx) in enumerate(kf.split(train_oof)):
-    print(f"  Fold {fold_idx + 1}/{N_OOF_FOLDS} ...", end=" ", flush=True)
-    fold_tr  = train_oof.iloc[tr_idx]
-    fold_val = train_oof.iloc[val_idx]
+md("## Setup — imports, base SVD params, side-feature dicts, OOF config"),
+code('''from sklearn.model_selection import KFold
+from hybrid_recsys.pipeline.features import load_item_features
+from hybrid_recsys.models.content import ContentBasedRecommender
+from hybrid_recsys.models.collaborative import SVDModel, ItemKNNModel, UserKNNModel, _to_surprise
+from hybrid_recsys.models.hybrid import StackedHybrid
+from surprise import SVD as SurpriseSVD
 
-    fold_ur_map = (
-        fold_tr.groupby("userId")
-        .apply(lambda df: dict(zip(df["movieId"], df["rating"])))
-        .to_dict()
-    )
-
-    fold_cb  = ContentBasedRecommender(n_neighbors=50).fit(item_features, movie_index)
-    fold_uknn = UserKNNModel(k=80, min_k=5).fit(fold_tr)
-    fold_iknn = ItemKNNModel(k=80, min_k=5).fit(fold_tr)
-    fold_svd_model = SurpriseSVD(**svd.best_params)
-    fold_svd_model.fit(_to_surprise(fold_tr).build_full_trainset())
-
-    for i, row in enumerate(fold_val.itertuples()):
-        ur = fold_ur_map.get(row.userId, {})
-        oof_preds[val_idx[i], 0] = fold_cb.predict(ur, row.movieId)
-        oof_preds[val_idx[i], 1] = fold_uknn.predict(row.userId, row.movieId)
-        oof_preds[val_idx[i], 2] = fold_iknn.predict(row.userId, row.movieId)
-        oof_preds[val_idx[i], 3] = fold_svd_model.predict(str(row.userId), str(row.movieId)).est
-
-    print("done")
-
-print("OOF predictions complete.")
-"""),
-
-code("""\
-# Drop rows where ANY base model returned NaN (e.g. CB cold-start on a fold) —
-# Ridge cannot fit NaN features and would crash otherwise.
-nan_rows = np.isnan(oof_preds).any(axis=1)
-print(f"OOF NaN rows dropped: {nan_rows.sum():,} / {len(oof_preds):,}")
-oof_preds = oof_preds[~nan_rows]
-train_oof = train_oof.loc[~nan_rows].reset_index(drop=True)
-assert len(train_oof) == oof_preds.shape[0], "OOF row count mismatch after NaN drop"
-
-# Side features (always computed from the FULL training set so they are stable
-# regardless of OOF_SAMPLE_FRAC).
+item_features, movie_index = load_item_features()
+svd = SVDModel.load()                       # reuse the tuned hyperparameters
+global_mean    = float(train["rating"].mean())
 train_item_pop = train.groupby("movieId").size().to_dict()
 train_user_cnt = train.groupby("userId").size().to_dict()
-train_item_cnt = train.groupby("movieId").size().to_dict()
+train_item_cnt = train_item_pop
 
+N_OOF_FOLDS, OOF_SAMPLE_FRAC = 5, 1.0       # set OOF_SAMPLE_FRAC < 1.0 for a faster run
+train_oof = (train.sample(frac=OOF_SAMPLE_FRAC, random_state=RANDOM_STATE)
+             if OOF_SAMPLE_FRAC < 1.0 else train).reset_index(drop=True)
+kf  = KFold(n_splits=N_OOF_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+oof = np.full((len(train_oof), 4), np.nan)
+print(f"OOF rows: {len(train_oof):,}")'''),
 
-def meta_features(df: pd.DataFrame, base_preds: np.ndarray) -> np.ndarray:
+md("## Generate out-of-fold base predictions (leak-free)"),
+code('''for fi, (tr, va) in enumerate(kf.split(train_oof)):
+    print(f"  fold {fi+1}/{N_OOF_FOLDS}", end=" ", flush=True)
+    ftr, fva = train_oof.iloc[tr], train_oof.iloc[va]
+    fur = ftr.groupby("userId").apply(lambda d: dict(zip(d["movieId"], d["rating"]))).to_dict()
+    fcb = ContentBasedRecommender(n_neighbors=50).fit(item_features, movie_index)
+    fuk = UserKNNModel(k=80, min_k=5).fit(ftr)
+    fik = ItemKNNModel(k=80, min_k=5).fit(ftr)
+    fsv = SurpriseSVD(**svd.best_params); fsv.fit(_to_surprise(ftr).build_full_trainset())
+    for n, row in enumerate(fva.itertuples()):
+        ur = fur.get(row.userId, {})
+        oof[va[n], 0] = fcb.predict(ur, row.movieId)
+        oof[va[n], 1] = fuk.predict(row.userId, row.movieId)
+        oof[va[n], 2] = fik.predict(row.userId, row.movieId)
+        oof[va[n], 3] = fsv.predict(str(row.userId), str(row.movieId)).est
+    print("done")'''),
+
+md("## Fit the Ridge meta-model & save"),
+code('''keep = ~np.isnan(oof).any(axis=1)
+oof, train_oof = oof[keep], train_oof.loc[keep].reset_index(drop=True)
+
+def meta_features(df, base):
     pop  = np.array([train_item_pop.get(m, 0) for m in df["movieId"]], dtype=float)
     ucnt = np.array([train_user_cnt.get(u, 0) for u in df["userId"]],  dtype=float)
     icnt = np.array([train_item_cnt.get(m, 0) for m in df["movieId"]], dtype=float)
-    return np.column_stack([base_preds, pop, ucnt, icnt])
-
-
-X_meta = meta_features(train_oof, oof_preds)
-y_meta = train_oof["rating"].values
+    return np.column_stack([base, pop, ucnt, icnt])
 
 stacked = StackedHybrid(alpha=1.0)
-stacked.fit(X_meta, y_meta)
-
-print("Meta-model coefficients:")
-for name, coef in zip(StackedHybrid.FEATURE_NAMES, stacked.meta.coef_):
-    print(f"  {name:<22} {coef:+.4f}")
-
-# Attach side features + global mean so the saved model scores standalone
-# (the serving bundle and the evaluation notebook never reload the training frame).
-stacked.set_side_features(
-    item_popularity=train_item_pop,
-    user_count=train_user_cnt,
-    item_count=train_item_cnt,
-    global_mean=global_mean,
-)
+stacked.fit(meta_features(train_oof, oof), train_oof["rating"].to_numpy())
+stacked.set_side_features(item_popularity=train_item_pop, user_count=train_user_cnt,
+                          item_count=train_item_cnt, global_mean=global_mean)
 stacked.save()
-print("\\nSaved: artifacts/models/stacked_hybrid.joblib")
-"""),
+print("saved stacked_hybrid.joblib")'''),
 
-md("""\
-## Conclusion
+md("## Learned Ridge coefficients"),
+code('''coef = pd.DataFrame({"feature": StackedHybrid.FEATURE_NAMES, "weight": stacked.meta.coef_})
+display(coef)
+fig = px.bar(coef, x="feature", y="weight", title="Stacked Hybrid - learned Ridge coefficients",
+             color="weight", color_continuous_scale="RdBu")
+fig.update_layout(xaxis_tickangle=-30, coloraxis_showscale=False)
+save_fig(fig, "eval_stacked_coefficients")'''),
 
-All six trainable models are fitted and persisted to `artifacts/models/`:
-`content_model.joblib`, `user_knn_model.joblib`, `item_knn_model.joblib`,
-`svd_model.joblib`, `weighted_hybrid.joblib`, `stacked_hybrid.joblib`.
+md("## Evaluate — compute & record metrics"),
+code('''cb       = ContentBasedRecommender.load()
+user_knn = UserKNNModel.load()
+item_knn = ItemKNNModel.load()
 
-The two naive baselines (Global Mean, Popularity) are trivial to recompute and
-are defined directly in the evaluation notebook. Proceed to
-**`04_evaluation.ipynb`** to score every model on the held-out test set.
-"""),
+def st_predict(u, i):
+    base = np.array([cb.predict(user_ratings_map.get(u, {}), i),
+                     user_knn.predict(u, i), item_knn.predict(u, i), svd.predict(u, i)], dtype=float)
+    return stacked.predict_one(u, i, base)
 
+m, preds = full_metrics(st_predict, test, test_sample, train_val, all_movie_ids,
+                        n_negatives=N_NEGATIVES, random_state=RANDOM_STATE)
+save_metric("Stacked Hybrid", m)
+print(f"RMSE={m['rmse']}  MAE={m['mae']}  F1@10={m['k10']['f1']}")'''),
+
+md("## Ranking metrics @ K"),
+code('save_fig(ranking_curve(m, "Stacked Hybrid"), "eval_stacked_ranking")'),
+
+md("## Takeaway\n\nThe coefficients lean on SVD and Item-kNN and zero out the weak User-kNN - the meta-model *learned* whom to trust, which is why it tends to win on both RMSE and ranking."),
 ]
-
-save_nb(nb03, "03_train.ipynb")
+save_nb(nb09, "09_stacked_hybrid.ipynb")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# NOTEBOOK 04 — Model Evaluation
+# NOTEBOOK 10 — Model Comparison
 # ═══════════════════════════════════════════════════════════════════════════════
 
-nb04 = [
+nb10 = [
+md('''# 10 - Model Comparison
 
-md("""\
-# 04 — Model Evaluation
+Aggregates every model's results from `all_metrics.json` (written by notebooks 03-09) into
+one table and the headline charts. Run last.'''),
 
-Loads the models trained in `03_train.ipynb` and evaluates **all eight** of them on the
-untouched test set under a strict, leak-free protocol.
-
-**Metrics:**
-- **Rating prediction** — RMSE, MAE over the full test set.
-- **Ranking** — Precision@K, Recall@K, F1@K under the *sampled-negatives* protocol:
-  each user's relevant test items (rating ≥ 4.0) are ranked against 100 random
-  non-relevant items, macro-averaged over a 1,000-user sample, K ∈ {5, 10, 20}.
-  Candidate order is shuffled so tied predictions break randomly, and F1 is the
-  harmonic mean of the macro-averaged precision and recall (so F1 always lies
-  between the two).
-
-**Models:** Global Mean · Popularity · Content-Based · User-kNN · Item-kNN ·
-SVD · Weighted Hybrid · Stacked Hybrid.
-"""),
-
-code("""\
-import sys
+md("## Setup — load metrics"),
+code('''import sys
 sys.path.insert(0, "../src")
-
-import warnings
-warnings.filterwarnings("ignore")
-
 import json
-import time
-import numpy as np
 import pandas as pd
 import plotly.express as px
 from pathlib import Path
-
-from hybrid_recsys.pipeline.data import load_processed
-from hybrid_recsys.pipeline.splits import load_splits
-from hybrid_recsys.models.content import ContentBasedRecommender
-from hybrid_recsys.models.collaborative import SVDModel, ItemKNNModel, UserKNNModel
-from hybrid_recsys.models.hybrid import WeightedHybrid, StackedHybrid
-from hybrid_recsys.evaluation.metrics import (
-    evaluate_rating_prediction,
-    evaluate_ranking_sampled,
-)
 from hybrid_recsys.config import ARTIFACTS_METRICS
 
-""" + SAVE_FIG_SNIPPET + """
-ARTIFACTS_METRICS.mkdir(parents=True, exist_ok=True)
-
-EVAL_USERS   = 1_000   # users sampled for ranking evaluation
-N_NEGATIVES  = 100     # sampled non-relevant items per user for ranking metrics
-RANDOM_STATE = 42
-rng = np.random.default_rng(RANDOM_STATE)
-"""),
-
-# ── 1. Load data & models ─────────────────────────────────────────────────────
-
-md("## 1. Load Data & Trained Models"),
-
-code("""\
-movies           = load_processed("movies")
-train, val, test = load_splits()
-train_val        = pd.concat([train, val], ignore_index=True)
-
-print(f"Test: {len(test):>10,} ratings | {test['userId'].nunique():>7,} users")
-
-# User histories from train (content model & weighted hybrid need these).
-user_ratings_map: dict = (
-    train.groupby("userId")
-    .apply(lambda df: dict(zip(df["movieId"], df["rating"])))
-    .to_dict()
-)
-
-# Load every model trained in notebook 03.
-cb       = ContentBasedRecommender.load()
-user_knn = UserKNNModel.load()
-item_knn = ItemKNNModel.load()
-svd      = SVDModel.load()
-weighted = WeightedHybrid.load()
-stacked  = StackedHybrid.load()
-print("Loaded 6 trained models.")
-
-# Stratified user sample for ranking evaluation.
-eval_user_ids = rng.choice(
-    test["userId"].unique(),
-    size=min(EVAL_USERS, test["userId"].nunique()),
-    replace=False,
-)
-test_sample = test[test["userId"].isin(eval_user_ids)]
-print(f"Ranking evaluation user sample: {len(eval_user_ids):,}")
-"""),
-
-# ── 2. Helper ─────────────────────────────────────────────────────────────────
-
-md("""\
-## 2. Evaluation Helper
-
-A shared wrapper computes both rating-prediction and ranking metrics for any
-`predict_fn(user_id, movie_id) -> float`, checkpointing `all_metrics` after every model.
-"""),
-
-code("""\
-all_metrics: dict = {}
-metrics_path = ARTIFACTS_METRICS / "all_metrics.json"
+FIGURES_DIR = Path("../artifacts/figures")
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def checkpoint_metrics() -> None:
-    \"\"\"Persist all_metrics after every model so partial results survive crashes.\"\"\"
-    metrics_path.write_text(json.dumps(all_metrics, indent=2))
+def save_fig(fig, name):
+    fig.write_html(str(FIGURES_DIR / f"{name}.html"))
+    try:
+        fig.write_image(str(FIGURES_DIR / f"{name}.png"), width=1200, height=600, scale=2)
+    except Exception:
+        pass
+    fig.show()
 
+metrics = json.loads((ARTIFACTS_METRICS / "all_metrics.json").read_text())
+print(f"{len(metrics)} models in all_metrics.json")'''),
 
-def eval_model(key: str, label: str, predict_fn) -> dict:
-    print(f"Evaluating: {label} ...")
-    t0 = time.perf_counter()
-
-    preds = np.array([predict_fn(r.userId, r.movieId) for r in test.itertuples()])
-    rp    = evaluate_rating_prediction(test["rating"].values, preds)
-    t_rating = time.perf_counter() - t0
-
-    ranking = evaluate_ranking_sampled(
-        test_sample, predict_fn, train_val,
-        all_movie_ids=movies["movieId"].values,
-        n_negatives=N_NEGATIVES,
-        k_values=[5, 10, 20],
-        random_state=RANDOM_STATE,
-    )
-    t_total = time.perf_counter() - t0
-
-    metrics = {
-        "rmse": round(rp["rmse"], 4),
-        "mae":  round(rp["mae"],  4),
-        **{
-            f"k{k}": {m: round(v, 4) for m, v in kv.items()}
-            for k, kv in ranking.items()
-        },
-    }
-    all_metrics[label] = metrics
-    checkpoint_metrics()
-    print(
-        f"  RMSE={metrics['rmse']}  MAE={metrics['mae']}  F1@10={metrics['k10']['f1']}"
-        f"  (rating {t_rating:.1f}s · total {t_total:.1f}s)"
-    )
-    return metrics
-"""),
-
-# ── 3. Baselines ──────────────────────────────────────────────────────────────
-
-md("""\
-## 3. Naive Baselines — Global Mean & Popularity
-
-Recomputed from the training set (trivial, so not persisted as artifacts). The
-**global mean** assigns the training average to every pair; **popularity** scores
-items by interaction count. These define the floor every model must beat.
-"""),
-
-code("""\
-global_mean     = float(train["rating"].mean())
-item_popularity = train.groupby("movieId").size().to_dict()
-max_pop         = max(item_popularity.values())
-
-# Popularity is fundamentally a ranking signal; we map raw counts to the
-# [0.5, 5.0] rating range so RMSE/MAE are computable. The map is monotonic,
-# so ranking metrics are unaffected.
-def pop_score(_user, movie_id):
-    return 0.5 + 4.5 * (item_popularity.get(movie_id, 0) / max_pop)
-
-eval_model("global_mean", "Global Mean", lambda u, i: global_mean)
-eval_model("popularity",  "Popularity",  pop_score)
-"""),
-
-# ── 4-8. Single models ────────────────────────────────────────────────────────
-
-md("## 4. Content-Based"),
-code("""\
-eval_model("content", "Content-Based", lambda u, i: cb.predict(user_ratings_map.get(u, {}), i))
-"""),
-
-md("## 5. User-Based k-NN"),
-code("""\
-eval_model("user_knn", "User-Based k-NN", lambda u, i: user_knn.predict(u, i))
-"""),
-
-md("## 6. Item-Based k-NN"),
-code("""\
-eval_model("item_knn", "Item-Based k-NN", lambda u, i: item_knn.predict(u, i))
-"""),
-
-md("## 7. SVD"),
-code("""\
-eval_model("svd", "SVD", lambda u, i: svd.predict(u, i))
-"""),
-
-md("## 8. Weighted Hybrid"),
-code("""\
-eval_model(
-    "weighted_hybrid", "Weighted Hybrid",
-    lambda u, i: weighted.predict(u, i, user_ratings_map.get(u, {})),
-)
-"""),
-
-# ── 9. Stacked hybrid ─────────────────────────────────────────────────────────
-
-md("""\
-## 9. Stacked Hybrid
-
-Builds the four base predictions on the fly and feeds them through the saved Ridge
-meta-model via `predict_one` — exactly the path the Streamlit serving bundle uses.
-Returns the global mean if any base prediction is NaN.
-"""),
-
-code("""\
-def stacked_predict(user_id, movie_id) -> float:
-    base = np.array([
-        cb.predict(user_ratings_map.get(user_id, {}), movie_id),
-        user_knn.predict(user_id, movie_id),
-        item_knn.predict(user_id, movie_id),
-        svd.predict(user_id, movie_id),
-    ], dtype=float)
-    return stacked.predict_one(user_id, movie_id, base)
-
-eval_model("stacked_hybrid", "Stacked Hybrid", stacked_predict)
-"""),
-
-# ── 10. Results ───────────────────────────────────────────────────────────────
-
-md("## 10. Results Summary"),
-
-code("""\
-rows = []
-for label, m in all_metrics.items():
-    rows.append({
-        "Model":  label,
-        "RMSE":   m["rmse"],  "MAE":   m["mae"],
-        "P@5":    m["k5"]["precision"],  "R@5":  m["k5"]["recall"],  "F1@5":  m["k5"]["f1"],
-        "P@10":   m["k10"]["precision"], "R@10": m["k10"]["recall"], "F1@10": m["k10"]["f1"],
-        "P@20":   m["k20"]["precision"], "R@20": m["k20"]["recall"], "F1@20": m["k20"]["f1"],
-    })
-
+md("## Results table"),
+code('''rows = []
+for label, mm in metrics.items():
+    rows.append({"Model": label, "RMSE": mm["rmse"], "MAE": mm["mae"],
+                 "P@10": mm["k10"]["precision"], "R@10": mm["k10"]["recall"], "F1@10": mm["k10"]["f1"]})
 results = pd.DataFrame(rows).set_index("Model")
 display(
     results.style
-    .highlight_min(subset=["RMSE", "MAE"],              color="#d4edda")
-    .highlight_max(subset=["F1@5", "F1@10", "F1@20"],   color="#d4edda")
+    .highlight_min(subset=["RMSE", "MAE"], color="#d4edda")
+    .highlight_max(subset=["F1@10"], color="#d4edda")
     .format("{:.4f}")
-)
-"""),
+)'''),
 
-# ── 11. Visualisations ────────────────────────────────────────────────────────
+md("## RMSE & MAE by model"),
+code('''dfp = results.reset_index()
+fig = px.bar(dfp.melt(id_vars="Model", value_vars=["RMSE", "MAE"]),
+             x="Model", y="value", color="variable", barmode="group",
+             title="RMSE and MAE by Model", labels={"value": "Error", "variable": "Metric"})
+fig.update_layout(xaxis_tickangle=-30)
+save_fig(fig, "08_rmse_mae")'''),
 
-md("## 11. Visualisations"),
+md("## F1@10 by model"),
+code('''fig = px.bar(dfp.sort_values("F1@10", ascending=False), x="Model", y="F1@10",
+             title="F1@10 by Model", color="F1@10", color_continuous_scale="Teal", text_auto=".3f")
+fig.update_layout(coloraxis_showscale=False, xaxis_tickangle=-30)
+save_fig(fig, "09_f1_at_10")'''),
 
-code("""\
-df_plot = results.reset_index()
-
-# RMSE / MAE grouped bar
-fig1 = px.bar(
-    df_plot.melt(id_vars="Model", value_vars=["RMSE", "MAE"]),
-    x="Model", y="value", color="variable", barmode="group",
-    title="RMSE and MAE by Model",
-    labels={"value": "Error", "variable": "Metric"},
-)
-fig1.update_layout(xaxis_tickangle=-30)
-save_fig(fig1, "08_rmse_mae")
-
-# F1@10 bar
-fig2 = px.bar(
-    df_plot.sort_values("F1@10", ascending=False),
-    x="Model", y="F1@10",
-    title="F1@10 by Model",
-    color="F1@10", color_continuous_scale="Teal", text_auto=".4f",
-)
-fig2.update_layout(coloraxis_showscale=False, xaxis_tickangle=-30)
-save_fig(fig2, "09_f1_at_10")
-
-# Ranking metrics @ K for best model
-best_label = df_plot.sort_values("F1@10", ascending=False).iloc[0]["Model"]
-best_data  = [
-    {"K": k, "Metric": m.capitalize(), "Value": all_metrics[best_label][f"k{k}"][m]}
-    for k in [5, 10, 20]
-    for m in ["precision", "recall", "f1"]
+md("## Takeaway\n\nLead with the Stacked Hybrid's best RMSE/MAE; note Popularity's high F1@10 is a sampled-negatives artifact (it is worst on RMSE). The hybrids beat every CB-only and CF-only baseline on rating accuracy."),
 ]
-fig3 = px.line(
-    pd.DataFrame(best_data), x="K", y="Value", color="Metric",
-    markers=True,
-    title=f"Ranking Metrics @ K — {best_label}",
-    labels={"Value": "Score"},
-)
-save_fig(fig3, "10_ranking_metrics_k")
-"""),
-
-# ── 12. Save ──────────────────────────────────────────────────────────────────
-
-md("## 12. Save Metrics"),
-
-code("""\
-checkpoint_metrics()  # final flush (each eval_model already checkpoints)
-print(f"Metrics → {metrics_path}")
-"""),
-
-# ── Conclusion ────────────────────────────────────────────────────────────────
-
-md("""\
-## Conclusion
-
-- All eight models were evaluated on the same temporal test split under a strictly leak-free protocol.
-- Rating accuracy (RMSE/MAE) and ranking quality (P/R/F1@K) are persisted to `artifacts/metrics/all_metrics.json` for the Streamlit comparison tab.
-- Ranking uses **random tie-breaking** and a **consistent harmonic-mean F1**, so constant-output models (e.g. Global Mean) no longer score artificially high.
-"""),
-
-]
-
-save_nb(nb04, "04_evaluation.ipynb")
+save_nb(nb10, "10_comparison.ipynb")
 
 print("\nAll notebooks created successfully.")

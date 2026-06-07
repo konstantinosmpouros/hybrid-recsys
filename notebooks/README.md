@@ -1,12 +1,13 @@
 # notebooks/
 
-Four notebooks that must be executed in order. Each saves its outputs so the
-next notebook can load them without re-computation.
+Ten notebooks executed in order. The first two prepare data/features; then one notebook
+per model trains **and** evaluates it; the last aggregates the comparison.
 
 ## Execution order
 
 ```text
-01_eda.ipynb  →  02_features.ipynb  →  03_train.ipynb  →  04_evaluation.ipynb
+01_eda → 02_features → 03_baselines → 04_content_based → 05_user_knn
+→ 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid → 10_comparison
 ```
 
 All notebooks add `../src` to `sys.path` so the `hybrid_recsys` package is
@@ -43,44 +44,42 @@ importable without a prior `pip install`.
 
 ---
 
-## 03_train.ipynb — Model Training
+## 03–09 — One notebook per model (train **and** evaluate)
 
-**Reads:** `data/processed/*`, `data/processed/item_features.npz`  
-**Writes:** `artifacts/models/*.joblib`
+Each model gets its own notebook that **trains + saves** the model, then **evaluates** it
+(RMSE/MAE on the full test set + Precision/Recall/F1@K via sampled-negatives, written to
+`all_metrics.json`), plus example recommendations and model-specific plots.
 
-Fits and **persists** the six trainable models — no evaluation here:
+| Notebook | Model | Notable extras |
+|---|---|---|
+| `03_baselines.ipynb` | Global Mean, Popularity | top-10 popular movies |
+| `04_content_based.ipynb` | Content-Based | "why this?" content neighbours of a liked movie |
+| `05_user_knn.ipynb` | User-Based k-NN | nearest-users **graph**, similarity distribution |
+| `06_item_knn.ipynb` | Item-Based k-NN | nearest-movies **graph** |
+| `07_svd.ipynb` | SVD | 5-fold CV; PCA of learned item factors |
+| `08_weighted_hybrid.ipynb` | Weighted Hybrid | α-sweep curve (loads SVD + CB) |
+| `09_stacked_hybrid.ipynb` | Stacked Hybrid | OOF stacking; Ridge coefficient bar |
 
-| Section | Model |
-|---|---|
-| §2 | Content-Based (cosine similarity) |
-| §3 | User-Based k-NN |
-| §4 | Item-Based k-NN |
-| §5 | SVD (with 5-fold GridSearchCV hyperparameter tuning) |
-| §6 | Weighted Hybrid (α tuned on validation RMSE) |
-| §7 | Stacked Hybrid (Ridge meta-learner on 5-fold OOF predictions) |
+Shared eval boilerplate lives in `hybrid_recsys.evaluation.report` (`full_metrics`,
+`save_metric`, `top_n`). Run in order — 08 loads the models saved by 04 & 07; 09 loads 04–07.
 
-> **Runtime note:** §5 (SVD grid search) and §7 (OOF stacking loop) are the
-> most compute-intensive — expect 20–60 minutes total on MovieLens 25M. Set
-> `OOF_SAMPLE_FRAC = 0.2` near the top of §7 for a faster (approximate) run.
+> **Runtime note:** 07 (SVD grid search) and 09 (OOF stacking loop) are the most
+> compute-intensive — set `OOF_SAMPLE_FRAC = 0.2` in 09 for a faster approximate run.
 
 ---
 
-## 04_evaluation.ipynb — Model Evaluation
+## 10_comparison.ipynb — Model Comparison
 
-**Reads:** `artifacts/models/*.joblib`, `data/processed/*`  
-**Writes:** `artifacts/metrics/all_metrics.json`  
-**Figures:** `artifacts/figures/08_*` through `10_*`
+**Reads:** `artifacts/metrics/all_metrics.json` · **Figures:** `08_rmse_mae`, `09_f1_at_10`
 
-Loads the trained models and scores all **eight** (the two naive baselines are
-recomputed inline) under a leak-free protocol: RMSE/MAE on the full test set, and
-Precision/Recall/F1@K via the sampled-negatives protocol. Results are summarised
-in a styled DataFrame and three Plotly charts.
+Aggregates every model's metrics into one table + the headline RMSE/MAE and F1@10 charts.
+Run last.
 
 ---
 
 ## generate.py
 
-Developer utility that regenerates all four `.ipynb` files from source using
+Developer utility that regenerates all `.ipynb` files from source using
 `nbformat`. Run from the project root:
 
 ```bash

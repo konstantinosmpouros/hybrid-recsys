@@ -37,8 +37,14 @@ knowledge_graphs_ass/
 ├── notebooks/
 │   ├── 01_eda.ipynb                 # exploratory data analysis & preprocessing
 │   ├── 02_features.ipynb            # item feature engineering
-│   ├── 03_train.ipynb               # model training (fits & saves all models)
-│   └── 04_evaluation.ipynb          # model evaluation (RMSE/MAE/P/R/F1@K)
+│   ├── 03_baselines.ipynb           # Global Mean & Popularity
+│   ├── 04_content_based.ipynb       # content model: train + evaluate
+│   ├── 05_user_knn.ipynb            # user-kNN: train + evaluate (+ neighbour graph)
+│   ├── 06_item_knn.ipynb            # item-kNN: train + evaluate (+ neighbour graph)
+│   ├── 07_svd.ipynb                 # SVD: train + evaluate (+ latent factor space)
+│   ├── 08_weighted_hybrid.ipynb     # weighted hybrid: tune α + evaluate
+│   ├── 09_stacked_hybrid.ipynb      # stacked hybrid: OOF train + evaluate
+│   └── 10_comparison.ipynb          # aggregate all metrics + charts
 ├── tests/
 │   ├── test_splits.py
 │   └── test_metrics.py
@@ -97,7 +103,7 @@ pip install -e .
 
 # 3. Run notebooks in order
 jupyter notebook
-#    01_eda.ipynb  →  02_features.ipynb  →  03_train.ipynb  →  04_evaluation.ipynb
+#    01_eda → 02_features → 03_baselines → 04…09 (one per model) → 10_comparison
 
 # 4. Launch the app
 streamlit run src/app/app.py
