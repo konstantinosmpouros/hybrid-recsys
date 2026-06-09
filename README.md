@@ -44,7 +44,12 @@ knowledge_graphs_ass/
 │   ├── 07_svd.ipynb                 # SVD: train + evaluate (+ latent factor space)
 │   ├── 08_weighted_hybrid.ipynb     # weighted hybrid: tune α + evaluate
 │   ├── 09_stacked_hybrid.ipynb      # stacked hybrid: OOF train + evaluate
-│   └── 10_comparison.ipynb          # aggregate all metrics + charts
+│   ├── 10_content_genome.ipynb      # extension: content model on the tag genome
+│   ├── 11_lightgcn.ipynb            # extension: LightGCN (graph CF, PyTorch)
+│   ├── 12_dual_head_hybrid.ipynb    # extension: dual-head hybrid (rating + ranking)
+│   ├── 13_semantic_content.ipynb    # extension: content model on sentence-transformer embeddings
+│   └── 14_advanced_eval.ipynb       # FINAL: comparison + NDCG/AUC + segmented + diversity
+│                                    #        + bootstrap CIs + cold-start + full-catalogue
 ├── tests/
 │   ├── test_splits.py
 │   └── test_metrics.py
@@ -103,7 +108,9 @@ pip install -e .
 
 # 3. Run notebooks in order
 jupyter notebook
-#    01_eda → 02_features → 03_baselines → 04…09 (one per model) → 10_comparison
+#    01_eda → 02_features → 03_baselines → 04…09 (one per model)
+#    → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
+#    → 14_advanced_eval (final: deep eval + comparison)
 
 # 4. Launch the app
 streamlit run src/app/app.py

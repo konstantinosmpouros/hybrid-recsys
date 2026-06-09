@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import joblib
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, LogisticRegression
 from ..config import ARTIFACTS_MODELS
 from ..evaluation.metrics import rmse
 
@@ -126,3 +126,67 @@ class StackedHybrid:
     @classmethod
     def load(cls) -> "StackedHybrid":
         return joblib.load(ARTIFACTS_MODELS / "stacked_hybrid.joblib")
+
+
+class DualHeadHybrid:
+    """Two-head blending hybrid that targets *all* metrics at once.
+
+    Both heads consume the SAME feature vector — the base-model predictions plus
+    side features — but optimise different objectives:
+
+      * rating_head : Ridge regression → predicts the rating  (drives RMSE/MAE)
+      * rank_head   : LogisticRegression → predicts P(rating ≥ 4)  (drives P/R/F1@K)
+
+    Trained by *blending* on the validation split (frozen base models, no OOF
+    re-run). NaN base predictions (e.g. LightGCN on out-of-graph users) are imputed
+    with the per-feature median learned at fit time.
+    """
+
+    FEATURE_NAMES = [
+        "pred_content_genome", "pred_user_knn", "pred_item_knn", "pred_svd",
+        "pred_lightgcn", "item_popularity", "user_rating_count", "item_rating_count",
+    ]
+
+    def __init__(self, ridge_alpha: float = 1.0, random_state: int = 42):
+        self.rating_head = Ridge(alpha=ridge_alpha, random_state=random_state)
+        self.rank_head = LogisticRegression(max_iter=1000, random_state=random_state)
+        self.impute_: np.ndarray | None = None
+
+    def _prep(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float).copy()
+        if self.impute_ is not None:
+            nan = np.isnan(X)
+            if nan.any():
+                idx = np.where(nan)
+                X[idx] = np.take(self.impute_, idx[1])
+        return X
+
+    def fit(self, X: np.ndarray, ratings: np.ndarray) -> "DualHeadHybrid":
+        X = np.asarray(X, dtype=float)
+        med = np.nanmedian(X, axis=0)
+        self.impute_ = np.where(np.isnan(med), 0.0, med)
+        Xi = self._prep(X)
+        ratings = np.asarray(ratings, dtype=float)
+        self.rating_head.fit(Xi, ratings)
+        self.rank_head.fit(Xi, (ratings >= 4.0).astype(int))
+        return self
+
+    def predict_rating(self, X: np.ndarray) -> np.ndarray:
+        return np.clip(self.rating_head.predict(self._prep(X)), 0.5, 5.0)
+
+    def rank_score(self, X: np.ndarray) -> np.ndarray:
+        return self.rank_head.predict_proba(self._prep(X))[:, 1]
+
+    def predict_rating_one(self, feats) -> float:
+        return float(self.predict_rating(np.asarray(feats, dtype=float).reshape(1, -1))[0])
+
+    def rank_score_one(self, feats) -> float:
+        return float(self.rank_score(np.asarray(feats, dtype=float).reshape(1, -1))[0])
+
+    def save(self, path=None) -> None:
+        ARTIFACTS_MODELS.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, path or ARTIFACTS_MODELS / "dual_head_hybrid.joblib")
+
+    @classmethod
+    def load(cls, path=None) -> "DualHeadHybrid":
+        return joblib.load(path or ARTIFACTS_MODELS / "dual_head_hybrid.joblib")

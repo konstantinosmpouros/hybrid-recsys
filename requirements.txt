@@ -9,6 +9,7 @@ streamlit>=1.30
 plotly>=5.18
 kaleido>=0.2
 umap-learn>=0.5
+torch>=2.0          # LightGCN (notebook 11) only
 pytest>=7.4
 jupyter>=1.0
 sentence-transformers>=2.2

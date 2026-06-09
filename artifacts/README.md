@@ -1,8 +1,8 @@
 # artifacts/
 
-Auto-generated outputs: each model notebook (03–09) trains its model into `models/` and
-appends its metrics to `metrics/all_metrics.json`; `10_comparison.ipynb` renders the
-comparison `figures/`.
+Auto-generated outputs: each model notebook (03–13) trains its model into `models/` and
+appends its metrics to `metrics/all_metrics.json`; `14_advanced_eval.ipynb` renders the
+comparison + deep-evaluation `figures/`.
 No files in `models/` or `metrics/` are tracked by git.
 
 ## models/
@@ -38,9 +38,10 @@ These are tracked by git as reference outputs.
 | `05_top_genres.html/png` | 01_eda | Genre frequency bar chart |
 | `06_genre_correlation.html/png` | 02_features | Genre co-occurrence heatmap |
 | `07_feature_variance.html/png` | 02_features | Explained variance of LSA components |
-| `08_rmse_mae.html/png` | 10_comparison | RMSE & MAE grouped bar chart |
-| `09_f1_at_10.html/png` | 10_comparison | F1@10 by model |
-| `eval_*` (ranking curves, error hists, kNN graphs, α-sweep, Ridge coefficients) | 03–09 | per-model evaluation plots |
+| `08_rmse_mae.html/png` | 14_advanced_eval | RMSE & MAE grouped bar chart |
+| `09_f1_at_10.html/png` | 14_advanced_eval | F1@10 by model |
+| `16_rating_vs_ranking` · `17_f1_curves` · `18_ndcg_auc` · `19_segmented_user` · `20_beyond_accuracy` · `21_bootstrap_rmse` | 14_advanced_eval | comparison & deep-eval plots |
+| `eval_*` (ranking curves, error hists, kNN graphs, α-sweep, coefficients, content-genome/embed) | 03–13 | per-model evaluation plots |
 | `11_rating_dist_by_split.html/png` | 01_eda | Rating distribution across train/val/test |
 | `12_long_tail_pareto.html/png` | 01_eda | Cumulative share of ratings vs share of movies |
 | `13_genre_frequency.html/png` | 02_features | Movies per genre (matrix column sums) |

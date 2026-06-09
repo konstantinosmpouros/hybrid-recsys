@@ -168,7 +168,7 @@ with tab_compare:
         metrics = bundle.load_metrics()
 
         if not metrics:
-            st.info("No evaluation metrics found yet. Run the model notebooks 03–09, then 10_comparison.ipynb.")
+            st.info("No evaluation metrics found yet. Run the model notebooks (03–13), then 14_advanced_eval.ipynb.")
         else:
             # Rating prediction table
             st.subheader("Rating Prediction")

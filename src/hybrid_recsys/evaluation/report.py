@@ -54,6 +54,27 @@ def save_metric(label: str, metrics: dict, path=None) -> dict:
     return data
 
 
+def bootstrap_ci(values: np.ndarray, n_boot: int = 1000, alpha: float = 0.05,
+                 agg="mean", random_state: int = 42):
+    """Bootstrap CI for a per-unit metric (e.g. per-row sq. error, or per-user F1).
+
+    `agg` is "rmse" (sqrt of mean) or "mean". Returns (point, lo, hi)."""
+    values = np.asarray(values, dtype=float)
+    values = values[~np.isnan(values)]
+    rng = np.random.default_rng(random_state)
+    n = len(values)
+
+    def _agg(v):
+        return float(np.sqrt(v.mean())) if agg == "rmse" else float(v.mean())
+
+    point = _agg(values)
+    boots = np.empty(n_boot)
+    for b in range(n_boot):
+        boots[b] = _agg(values[rng.integers(0, n, n)])
+    lo, hi = np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return round(point, 4), round(float(lo), 4), round(float(hi), 4)
+
+
 def top_n(predict_fn, user_id, seen, candidate_ids, movies, n: int = 10) -> pd.DataFrame:
     """Top-n recommended movies for a user from a candidate pool, joined with titles."""
     scored = [(int(m), predict_fn(user_id, m)) for m in candidate_ids if m not in seen]

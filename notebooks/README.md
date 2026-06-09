@@ -1,13 +1,16 @@
 # notebooks/
 
-Ten notebooks executed in order. The first two prepare data/features; then one notebook
-per model trains **and** evaluates it; the last aggregates the comparison.
+Fourteen notebooks executed in order. The first two prepare data/features; then one
+notebook per model trains **and** evaluates it; three extension notebooks follow; the
+last aggregates the comparison.
 
 ## Execution order
 
 ```text
 01_eda → 02_features → 03_baselines → 04_content_based → 05_user_knn
-→ 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid → 10_comparison
+→ 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid
+→ 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
+→ 14_advanced_eval   (final: deep evaluation + comparison)
 ```
 
 All notebooks add `../src` to `sys.path` so the `hybrid_recsys` package is
@@ -68,12 +71,33 @@ Shared eval boilerplate lives in `hybrid_recsys.evaluation.report` (`full_metric
 
 ---
 
-## 10_comparison.ipynb — Model Comparison
+## 10–14 — Extensions (additive; the frozen models 03–09 are untouched)
 
-**Reads:** `artifacts/metrics/all_metrics.json` · **Figures:** `08_rmse_mae`, `09_f1_at_10`
+| Notebook | What |
+|---|---|
+| `10_content_genome.ipynb` | A 2nd content model on the **tag genome** (`genre ⊕ SVD(genome)`); measures the lift vs the TF-IDF content model. |
+| `11_lightgcn.ipynb` | **LightGCN** graph CF (PyTorch, BPR loss). Ranking-only (embedding scores aren't ratings). Trains on a user subsample. |
+| `12_dual_head_hybrid.ipynb` | **Dual-head hybrid**: a Ridge rating head (RMSE/MAE) + a logistic rank head (P/R/F1) blended on validation over all base models incl. genome & LightGCN. |
+| `13_semantic_content.ipynb` | A 3rd content model on **sentence-transformer embeddings** (`all-MiniLM-L6-v2`); meaning-aware similarity vs TF-IDF/genome. |
+| `14_advanced_eval.ipynb` | **FINAL** notebook — folds in the comparison **and** the deep eval (see below). |
 
-Aggregates every model's metrics into one table + the headline RMSE/MAE and F1@10 charts.
-Run last.
+---
+
+## 14_advanced_eval.ipynb — Advanced Evaluation & Comparison (final)
+
+Loads **all** trained models and runs the full battery (re-scoring frozen models, no
+re-training):
+
+- **A. Comparison leaderboard** from `all_metrics.json` — full P/R/F1@K table, RMSE/MAE &
+  F1@10 charts, the **rating-vs-ranking scatter**, and F1@K curves.
+- **B. NDCG@K & AUC** — robust ranking metrics.
+- **C. Segmented RMSE** by user-activity / item-popularity buckets.
+- **D. Beyond-accuracy** — coverage, diversity, novelty.
+- **E. Bootstrap CIs** on RMSE.
+- **F. Cold-start** simulation (content models with 3 ratings).
+- **G. Full-catalogue** ranking sanity pass.
+
+Deep sections run on bounded samples (config constants at the top of each cell).
 
 ---
 
