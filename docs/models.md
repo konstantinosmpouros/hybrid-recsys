@@ -2,7 +2,7 @@
 
 Complete reference for every model: philosophy, data, training mechanics (with the
 actual maths), prediction formula, hyperparameters, complexity/memory, strengths &
-weaknesses, and back-stage caveats. Verified against [`src/hybrid_recsys/`](../src/hybrid_recsys/).
+weaknesses, and back-stage caveats. Verified against [`hybrid_recsys/`](../hybrid_recsys/).
 
 ---
 
@@ -73,7 +73,7 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 ## 3. Content-Based — CB, memory-based
 
-[`models/content.py`](../src/hybrid_recsys/models/content.py)
+[`models/content.py`](../hybrid_recsys/models/content.py)
 
 - **Philosophy.** "You liked these; here are movies that *look similar by their attributes*." Recommends from **item content**, independent of other users → it can score brand-new (cold) items that CF cannot.
 - **Data.** The 276-dim feature matrix + the target user's own training history.
@@ -97,7 +97,7 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 ## 4. User-Based k-NN — CF, memory-based
 
-[`models/collaborative.py`](../src/hybrid_recsys/models/collaborative.py)
+[`models/collaborative.py`](../hybrid_recsys/models/collaborative.py)
 
 - **Philosophy.** "People whose taste matches yours rated *i* like this." Pure collaborative filtering — uses only the rating matrix, no content.
 - **Data.** Training ratings (ids cast to strings; `Reader(rating_scale=(0.5, 5.0))`).
@@ -114,7 +114,7 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 ## 5. Item-Based k-NN — CF, memory-based
 
-[`models/collaborative.py`](../src/hybrid_recsys/models/collaborative.py)
+[`models/collaborative.py`](../hybrid_recsys/models/collaborative.py)
 
 - **Philosophy.** "Items similar to ones you already liked." Same idea as user-kNN but over the **item** space — more stable in movie domains (the catalogue changes slower than the user population, and item-item co-rating is denser).
 - **Data / Training.** Same `KNNWithMeans` (Pearson-baseline, `k = 80`, `min_k = 5`) but `user_based=False` → an **item × item similarity matrix**.
@@ -129,7 +129,7 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 ## 6. SVD — CF, matrix factorisation (the one genuinely *trained* model)
 
-[`models/collaborative.py`](../src/hybrid_recsys/models/collaborative.py)
+[`models/collaborative.py`](../hybrid_recsys/models/collaborative.py)
 
 - **Philosophy.** Every user and movie gets a short **latent vector** in a shared space; their dot product reconstructs the rating. The factors discover patterns ("likes dark sci-fi", "is a crowd-pleaser") that no single neighbour reveals.
 - **Data.** Training ratings.
@@ -154,7 +154,7 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 ## 7. Weighted Hybrid — CB + CF by fixed blend
 
-[`models/hybrid.py`](../src/hybrid_recsys/models/hybrid.py)
+[`models/hybrid.py`](../hybrid_recsys/models/hybrid.py)
 
 - **Philosophy.** The simplest fusion: trust SVD for accuracy, lean on CB for cold-start/content coverage, mix them linearly.
 - **Data.** The already-trained SVD and Content-Based models (held by reference).
@@ -170,7 +170,7 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 ## 8. Stacked Hybrid — CB + CF by learned meta-model
 
-[`models/hybrid.py`](../src/hybrid_recsys/models/hybrid.py)
+[`models/hybrid.py`](../hybrid_recsys/models/hybrid.py)
 
 - **Philosophy.** Don't guess the weights — **learn** them, and over richer signals, so the combiner can down-weight weak base models automatically and use context (popularity, how active the user is) to decide whom to trust.
 - **Features (7 per pair).** `[pred_content, pred_user_knn, pred_item_knn, pred_svd, item_popularity, user_rating_count, item_rating_count]` — the four base predictions plus three side features.
@@ -213,9 +213,9 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 | Model | File |
 |---|---|
 | Global Mean, Popularity | inline in `03_baselines.ipynb` |
-| Content-Based | [`models/content.py`](../src/hybrid_recsys/models/content.py) |
-| User-kNN, Item-kNN, SVD | [`models/collaborative.py`](../src/hybrid_recsys/models/collaborative.py) |
-| Weighted & Stacked Hybrid | [`models/hybrid.py`](../src/hybrid_recsys/models/hybrid.py) |
-| Feature matrix (CB input) | [`pipeline/features.py`](../src/hybrid_recsys/pipeline/features.py) |
-| Evaluation (both metric families) | [`evaluation/metrics.py`](../src/hybrid_recsys/evaluation/metrics.py) |
-| Serving (loads all, exposes `predict`) | [`serving.py`](../src/hybrid_recsys/serving.py) |
+| Content-Based | [`models/content.py`](../hybrid_recsys/models/content.py) |
+| User-kNN, Item-kNN, SVD | [`models/collaborative.py`](../hybrid_recsys/models/collaborative.py) |
+| Weighted & Stacked Hybrid | [`models/hybrid.py`](../hybrid_recsys/models/hybrid.py) |
+| Feature matrix (CB input) | [`pipeline/features.py`](../hybrid_recsys/pipeline/features.py) |
+| Evaluation (both metric families) | [`evaluation/metrics.py`](../hybrid_recsys/evaluation/metrics.py) |
+| Serving (loads all, exposes `predict`) | [`serving.py`](../backend/serving.py) |

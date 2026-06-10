@@ -10,7 +10,9 @@ Konstantinos Mpouros
 A hybrid recommender system built on the **MovieLens 25M** dataset (25 M ratings, 162 K users, 62 K movies).
 It combines **content-based filtering** (cosine similarity on genre + TF-IDF item features) with
 **collaborative filtering** (User-kNN, Item-kNN, SVD) into two fusion models — a weighted ensemble and
-a Ridge meta-learner — and exposes everything through a **Streamlit** web application.
+a Ridge meta-learner — plus four extension models (Content-Genome, Content-Embeddings, LightGCN, a
+Dual-Head Hybrid). All 12 models are served through a **FastAPI** backend and a **Streamlit** front-end
+(a thin HTTP client).
 
 ---
 
@@ -18,22 +20,26 @@ a Ridge meta-learner — and exposes everything through a **Streamlit** web appl
 
 ```text
 knowledge_graphs_ass/
-├── src/
-│   ├── hybrid_recsys/               # installable library package
-│   │   ├── config.py                # paths & global constants
-│   │   ├── serving.py               # RecommenderBundle — loads artifacts for the app
-│   │   ├── pipeline/
-│   │   │   ├── data.py              # raw CSV loading & preprocessing
-│   │   │   ├── splits.py            # user-wise temporal train/val/test split
-│   │   │   └── features.py          # item feature matrix (genres + TF-IDF + LSA)
-│   │   ├── models/
-│   │   │   ├── content.py           # content-based item-item recommender
-│   │   │   ├── collaborative.py     # SVD, ItemKNN, UserKNN (Surprise wrappers)
-│   │   │   └── hybrid.py            # WeightedHybrid & StackedHybrid
-│   │   └── evaluation/
-│   │       └── metrics.py           # RMSE, MAE, Precision/Recall/F1@K
-│   └── app/
-│       └── app.py                   # Streamlit app (3 tabs)
+├── hybrid_recsys/                   # installable ML library
+│   ├── config.py                    # paths & global constants
+│   ├── pipeline/
+│   │   ├── data.py                  # raw CSV loading & preprocessing
+│   │   ├── splits.py                # user-wise temporal train/val/test split
+│   │   └── features.py              # item features (genres + TF-IDF/LSA; + genome, embeddings)
+│   ├── models/
+│   │   ├── content.py               # content-based item-item recommender
+│   │   ├── collaborative.py         # SVD, ItemKNN, UserKNN (Surprise wrappers)
+│   │   ├── hybrid.py                # WeightedHybrid, StackedHybrid, DualHeadHybrid
+│   │   └── lightgcn.py              # LightGCN graph CF (PyTorch)
+│   └── evaluation/
+│       ├── metrics.py               # RMSE, MAE, P/R/F1@K, NDCG, AUC, coverage…
+│       └── report.py                # shared notebook eval helpers
+├── backend/                         # FastAPI REST service
+│   ├── main.py                      # endpoints (recommend/compare/predict/explain/search/…)
+│   ├── serving.py                   # RecommenderBundle — loads artifacts, serves all 12 models
+│   └── schemas.py                   # pydantic request models
+├── app/
+│   └── app.py                       # Streamlit UI — thin HTTP client (6 tabs)
 ├── notebooks/
 │   ├── 01_eda.ipynb                 # exploratory data analysis & preprocessing
 │   ├── 02_features.ipynb            # item feature engineering
@@ -82,6 +88,15 @@ knowledge_graphs_ass/
 | **Weighted Hybrid** | α·SVD + (1−α)·CB, α tuned on validation | custom |
 | **Stacked Hybrid** | Ridge meta-learner on out-of-fold predictions | scikit-learn |
 
+**Extension models** (additive — the 8 above stay frozen):
+
+| Model | Type | Library |
+| --- | --- | --- |
+| Content — Tag Genome | Content on genre ⊕ SVD(tag-genome) | scikit-learn |
+| Content — Embeddings | Content on sentence-transformer embeddings | sentence-transformers |
+| LightGCN | Graph CF, BPR loss (ranking-only) | PyTorch |
+| **Dual-Head Hybrid** | Ridge rating head + logistic rank head over all base models | scikit-learn |
+
 ---
 
 ## Evaluation protocol
@@ -112,14 +127,29 @@ jupyter notebook
 #    → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
 #    → 14_advanced_eval (final: deep eval + comparison)
 
-# 4. Launch the app
-streamlit run src/app/app.py
+# 4. Launch the app — TWO processes (backend API + Streamlit UI)
+#    Easiest on Windows: ./run_local.ps1   (starts both)
+#    Or manually, in two terminals:
+python -m uvicorn backend.main:app --port 8000     # backend  → http://localhost:8000/docs
+python -m streamlit run app/app.py                 # UI       → http://localhost:8501
 ```
+
+> Use `python -m uvicorn` / `python -m streamlit` (not the bare `uvicorn`/`streamlit`
+> commands) so they run under the same interpreter that has `scikit-surprise` installed.
+> The backend lazy-loads ~8 GB of models on its first request, so the first
+> recommendation can take a minute.
+
+### API
+
+The backend exposes a typed REST API (interactive docs at `/docs`):
+`/api/recommend` · `/api/recommend/compare` · `/api/predict` · `/api/explain` ·
+`/api/movies/search` · `/api/movies/{id}/similar` · `/api/users/{id}/profile` ·
+`/api/metrics` · `/api/figures`.
 
 ### Docker (Linux / Mac)
 
 ```bash
-# Build and serve the app (mount pre-built artifacts from the host)
+# Build and serve both services: backend (:8000) + Streamlit app (:8501)
 docker compose up --build
 ```
 
@@ -145,7 +175,9 @@ Key packages — full list in [`requirements.txt`](requirements.txt):
 - `scikit-learn` — TF-IDF, TruncatedSVD, cosine similarity, Ridge
 - `scikit-surprise` — KNNWithMeans, SVD, GridSearchCV (requires `numpy<2`)
 - `pandas` / `numpy` / `scipy` — data manipulation and sparse matrices
-- `streamlit` — web application
+- `fastapi` / `uvicorn` — REST backend serving all 12 models
+- `streamlit` / `requests` — web UI (HTTP client)
+- `torch` — LightGCN · `sentence-transformers` — embedding content model
 - `plotly` — interactive charts
 - `joblib` — model serialisation
 

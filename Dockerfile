@@ -2,9 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# scikit-surprise requires a C compiler to build from source
+# scikit-surprise requires a C compiler to build from source; curl for healthchecks
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
+        build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -13,9 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN pip install --no-cache-dir -e .
 
-EXPOSE 8501
+# 8000 = FastAPI backend · 8501 = Streamlit app. docker-compose runs one per service.
+EXPOSE 8000 8501
 
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
-
-ENTRYPOINT ["streamlit", "run", "src/app/app.py", \
-            "--server.port=8501", "--server.address=0.0.0.0"]
+# Default command = backend API. The Streamlit service overrides `command` in compose.
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -17,12 +17,16 @@ Serialised model objects saved with `joblib`. Loaded at runtime by `RecommenderB
 | `svd_model.joblib` | `SVDModel` | Surprise SVD with tuned hyperparameters |
 | `weighted_hybrid.joblib` | `WeightedHybrid` | α·SVD + (1−α)·CB with tuned α |
 | `stacked_hybrid.joblib` | `StackedHybrid` | Ridge meta-learner trained on OOF predictions |
+| `content_genome_model.joblib` | `ContentBasedRecommender` | Content model on genre ⊕ SVD(tag-genome) |
+| `content_embed_model.joblib` | `ContentBasedRecommender` | Content model on sentence-transformer embeddings |
+| `lightgcn_model.joblib` | `LightGCNRecommender` | LightGCN graph CF (ranking-only) |
+| `dual_head_hybrid.joblib` | `DualHeadHybrid` | Ridge rating head + logistic rank head over all base models |
 
 ## metrics/
 
 | File | Description |
 | --- | --- |
-| `all_metrics.json` | RMSE, MAE, P@K, R@K, F1@K for every model — loaded by the Streamlit app |
+| `all_metrics.json` | RMSE, MAE, P@K, R@K, F1@K for every model — served by the backend (`/api/metrics`) to the app |
 
 ## figures/
 

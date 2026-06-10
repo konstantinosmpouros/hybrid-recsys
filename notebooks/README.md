@@ -13,8 +13,8 @@ last aggregates the comparison.
 → 14_advanced_eval   (final: deep evaluation + comparison)
 ```
 
-All notebooks add `../src` to `sys.path` so the `hybrid_recsys` package is
-importable without a prior `pip install`.
+All notebooks add `..` (the repo root) to `sys.path` so the `hybrid_recsys`
+package is importable without a prior `pip install`.
 
 ---
 

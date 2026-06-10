@@ -97,7 +97,7 @@ Temporal analysis → Train / val / test split → Save processed data.
 
 code("""\
 import sys
-sys.path.insert(0, "../src")
+sys.path.insert(0, "..")
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -542,7 +542,7 @@ TruncatedSVD compression → Assemble & save item feature matrix.
 
 code("""\
 import sys
-sys.path.insert(0, "../src")
+sys.path.insert(0, "..")
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -864,7 +864,7 @@ save_nb(nb02, "02_features.ipynb")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SETUP_ENV = '''import sys
-sys.path.insert(0, "../src")
+sys.path.insert(0, "..")
 import warnings
 warnings.filterwarnings("ignore")
 

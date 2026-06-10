@@ -1,0 +1,39 @@
+# Keep the build context tiny. Models & data are mounted at runtime as volumes
+# (see docker-compose.yml), so they must NOT be copied into the image.
+.git/
+.github/
+
+# Large data & trained artifacts (multi-GB) — mounted read-only at runtime
+data/
+artifacts/
+*.joblib
+*.npz
+*.parquet
+*.csv
+
+# Python caches / build leftovers
+**/__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Notebooks & their checkpoints (not needed to run the app/backend)
+notebooks/
+**/.ipynb_checkpoints/
+
+# Envs / IDE / OS
+.venv/
+**/agent_venv/
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs & project context
+docs/
+CLAUDE.md
+run_local.ps1

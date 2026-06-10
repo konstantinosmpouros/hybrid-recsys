@@ -1,11 +1,33 @@
+name: hybrid-recsys
+
 services:
-  app:
+  backend:
     build: .
+    container_name: hybrid-recsys-backend
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8501:8501"
+      - "8806:8000"   # host 8806 -> container 8000  (backend API + /docs)
     volumes:
       - ./artifacts:/app/artifacts:ro
       - ./data:/app/data:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: hybrid-recsys-app
+    command: streamlit run app/app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8807:8501"   # host 8807 -> container 8501  (open this in the browser)
     environment:
-      - PYTHONPATH=/app/src
+      # talks to the backend over the internal compose network (container port 8000)
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
     restart: unless-stopped
