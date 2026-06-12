@@ -31,6 +31,25 @@ From that one scalar we derive **both** metric families:
 
 So **ranking is never produced directly — it is just "sort the candidates by `predict`."** This is why the shared `full_metrics(predict_fn, ...)` helper (in `evaluation/report.py`, called by each per-model notebook) takes only a `predict_fn` and computes everything.
 
+### The metrics, defined
+
+The five required metrics plus the extended/beyond-accuracy ones used in notebooks 14–16:
+
+| Metric | Family | Definition | Direction |
+|---|---|---|---|
+| **RMSE** | rating | √(mean of (true − predicted)²) over the full test set | lower better |
+| **MAE** | rating | mean of \|true − predicted\| over the full test set | lower better |
+| **Precision@K** | ranking | fraction of the top-K recommendations that are relevant (rating ≥ 4) | higher better |
+| **Recall@K** | ranking | fraction of the user's relevant items that land in the top-K | higher better |
+| **F1@K** | ranking | harmonic mean of **macro** Precision@K and Recall@K (so F1 lies between them) | higher better |
+| **NDCG@K** | ranking | discounted cumulative gain — like F1 but rewards ranking relevant items *higher* in the list | higher better |
+| **AUC** | ranking | P(a relevant item is scored above a random non-relevant one), via Mann–Whitney | higher better |
+| **Coverage** | beyond-acc. | fraction of the catalogue that ever appears in some user's top-K | higher = explores more |
+| **Diversity** | beyond-acc. | mean (1 − cosine similarity) within a list, in the content space | higher = less repetitive |
+| **Novelty** | beyond-acc. | mean −log₂ p(item) of recommendations (rare items score high) | higher = less blockbuster-y |
+
+All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evaluation/metrics.py); the rating + P/R/F1@K set is persisted to `all_metrics.json`, while NDCG/AUC/coverage/diversity/novelty are computed live in notebook 14 and shown as figures. The **consolidated results report** ([`notebooks/16_evaluation_report.ipynb`](../notebooks/16_evaluation_report.ipynb)) tabulates and visualises all of them with commentary.
+
 ### Heuristic vs. learned
 
 | Camp | Models | "fit" means |
@@ -49,7 +68,19 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 ### Two similarity functions used throughout
 
 - **Cosine** (content model): for L2-normalised vectors `a, b`, `sim = aᵀb`. Range [−1, 1]; only the *direction* of the feature vector matters, not its magnitude.
-- **Pearson-baseline** (Surprise kNN): a Pearson correlation computed on **baseline-centred** ratings (`r_{u,i} − (μ + b_u + b_i)`) with **shrinkage** toward 0 for pairs with few co-ratings. The baseline removes "this user rates high / this movie is loved" effects so the correlation reflects genuine taste agreement; shrinkage stops two users who share only one movie from looking perfectly similar.
+- **Pearson-baseline** (Surprise kNN): a Pearson correlation computed on **baseline-centred** ratings with **shrinkage** toward 0 for pairs with few co-ratings. Concretely, with the baseline `b_{u,i} = μ + b_u + b_i` and (for the item–item case) `U_{ij}` = users who rated both *i* and *j*:
+
+  ```
+              Σ_{u∈U_ij} (r_{u,i} − b_{u,i})(r_{u,j} − b_{u,j})
+  ρ̂(i,j) = ─────────────────────────────────────────────────────────
+            √Σ_{u∈U_ij}(r_{u,i} − b_{u,i})² · √Σ_{u∈U_ij}(r_{u,j} − b_{u,j})²
+
+                       |U_ij| − 1
+  sim(i,j) = ────────────────────────── · ρ̂(i,j)        (shrinkage = 100, Surprise default)
+              |U_ij| − 1 + shrinkage
+  ```
+
+  Two effects: the baseline-centring removes "this user rates high / this movie is loved" offsets so the correlation reflects genuine taste agreement, and the shrinkage factor `(n−1)/(n−1+100)` crushes similarities supported by few co-ratings — two users who share a single movie can no longer look perfectly similar. (The user–user case is symmetric, with `I_{uv}` = items co-rated by users *u* and *v*.)
 
 ---
 
@@ -126,6 +157,30 @@ So **ranking is never produced directly — it is just "sort the candidates by `
 
 - **Memory caveat.** Full 62K-item matrix ≈ **15 GB**, so it **caps to the 15K most-rated items** (→ ~900 MB). Because ratings concentrate on popular titles, this cap barely reduces coverage — which is exactly why item-kNN's RMSE (≈ 0.83) is far better than user-kNN's (≈ 1.04): the item cap rarely bites, the user cap bites hard.
 - **Strengths.** Robust, strong RMSE; the most reliable pure-CF model here.
+
+### What Surprise actually does at predict time (both kNN models)
+
+Calling `model.predict(u, i)` on a Surprise `KNNWithMeans` runs this pipeline in the background:
+
+1. **Id translation.** Raw ids (cast to `str` by our wrapper) are mapped to Surprise's inner
+   integer ids. If the user **or** the item was not in the trainset — e.g. outside the 20K-user
+   sample (User-kNN) or the 15K-item cap (Item-kNN) — Surprise raises `PredictionImpossible`
+   *internally*, catches it, and returns the **default estimate = the global train mean μ**.
+   Never an exception, never NaN.
+2. **Neighbour retrieval.** Otherwise it reads the precomputed similarity row and keeps the
+   `k = 80` most-similar users/items **that actually rated the target** (co-rated support, not
+   just globally similar ones).
+3. **`min_k` guard.** If fewer than `min_k = 5` such neighbours exist, the weighted-deviation
+   term is dropped and the prediction collapses to the plain mean (`r̄_u` user-based, `r̄_i`
+   item-based).
+4. **Aggregation + clipping.** Else the mean-centred weighted average above is computed and the
+   result is clipped to the 0.5–5.0 scale.
+
+Two consequences worth internalising: **(a)** User-kNN's 20K-user sample means roughly 90% of
+test calls exit at step 1 with the global-mean fallback — which is exactly why its metrics
+hover near Global Mean; **(b)** the Surprise models **never return NaN**, unlike the content
+models — a distinction that drives the hybrid fallback logic (see the
+[fallback-semantics table](#fallback--edge-case-semantics-all-12-models) below).
 
 ## 6. SVD — CF, matrix factorisation (the one genuinely *trained* model)
 
@@ -278,8 +333,20 @@ representation), one brings a **graph** learner, and one is a second hybrid that
   NaN base predictions (e.g. LightGCN on an out-of-graph user) are **imputed with the
   per-feature median** learned at fit time, so the heads always see a complete vector — meaning
   it can **score every candidate**, unlike raw LightGCN.
-- **Prediction.** `predict_rating` (clipped Ridge output) for rating metrics;
-  `rank_score = P(rating ≥ 4)` for ranking.
+- **Prediction (two heads, one feature vector `x ∈ ℝ⁸`).** After median-imputing any NaN
+  entries of `x`:
+
+  ```
+  rating head :  r̂(u,i)    = clip( w_rᵀx + b_r , 0.5, 5.0 )        Ridge — drives RMSE/MAE
+  rank head   :  P(like)   = σ( w_kᵀx + b_k ) = 1 / (1 + e^−(w_kᵀx + b_k))
+                                                                    logistic — drives P/R/F1@K
+  ```
+
+  **Top-N lists are sorted by the rank head's probability; star ratings come from the rating
+  head.** The two heads share the same inputs but their weight vectors `w_r`, `w_k` are fit to
+  *different objectives* (squared error vs log-loss on `rating ≥ 4`) — that separation is the
+  whole point: it removes the compromise a single regressor must make between calibration and
+  separation (see the rating-vs-ranking trade-off in [`evaluation.md`](evaluation.md) §6).
 - **Result.** **Best RMSE in the whole project (0.8028)** and a strong F1@10 (≈ 0.42). It
   targets *all five* required metrics with one model and is the app's default recommender.
 - **Trade-off.** More moving parts than the Weighted/Stacked hybrids and depends on five base
@@ -302,6 +369,39 @@ representation), one brings a **graph** learner, and one is a second hybrid that
   model**. The honest finding: a curated relevance signal (genome) beats a general-purpose
   embedding *here*, because the genome was built specifically to describe these movies. The
   three content spaces are compared side-by-side in the app's **Movie Explorer**.
+
+---
+
+## Fallback & edge-case semantics (all 12 models)
+
+What every model does **in the background** when the happy path fails — the behaviour that
+drives the hybrid fallback logic, the NaN-filtering in the ranking evaluators, and the serving
+layer's guards. ("Unknown" = not present at fit time.)
+
+| Model | Unknown movie | Unknown user / empty history | Too little evidence | Can return NaN? |
+|---|---|---|---|---|
+| Global Mean | `μ` | `μ` | — | no |
+| Popularity | maps count 0 → 0.5 | (not personalised) | — | no |
+| Content (TF-IDF / Genome / Embed) | **NaN** (not in `movie_index`) | **NaN** (empty ratings dict) | returns the **user mean `r̄_u`** when none of the top-L neighbours were rated | **yes** |
+| User-kNN | global mean `μ` | global mean `μ` (outside the 20K sample — ~90% of test users) | `r̄_u` when < `min_k` = 5 neighbours | no |
+| Item-kNN | global mean `μ` (outside the 15K cap) | global mean `μ` | `r̄_i` when < `min_k` = 5 neighbours | no |
+| SVD | bias-only `μ + b_u` | bias-only `μ + b_i` (both unknown → `μ`) | — | no |
+| Weighted Hybrid | **falls back to pure SVD** whenever CB returns NaN | SVD side handles it | — | no |
+| Stacked Hybrid | returns its stored **`global_mean`** if *any* base prediction is NaN | same | — | no |
+| LightGCN | **NaN** (item outside the training subgraph) | **NaN** (user outside the 10K subsample) | — | **yes** |
+| Dual-Head Hybrid | NaN bases **median-imputed** (per-feature medians learned at fit) → always scores | same | — | no |
+
+Three design consequences:
+
+1. **NaN is a signal, not a bug.** The content models and LightGCN return NaN precisely where
+   they have *no basis* for a prediction; the ranking evaluators drop NaN candidates, and the
+   hybrids convert NaN into a fallback (SVD / global mean / median imputation) — so a hybrid
+   never fails where its strongest parent succeeds.
+2. **The Surprise models silently degrade rather than fail** — useful for robustness, but it
+   means a "prediction" from User-kNN is very often just the global mean (its evaluation
+   numbers say as much).
+3. **Only the Dual-Head can score literally every (user, movie) pair**, because imputation
+   guarantees a complete feature vector — which is why it's the app's default recommender.
 
 ---
 
@@ -374,3 +474,30 @@ and bootstrap CIs on top of this table.)
 > sentence-transformer embeddings). This is deliberate: it isolates the effect of the
 > *representation* from the algorithm, and the result (genome ≫ embeddings > TF-IDF) is the
 > headline content finding.
+
+---
+
+## Diagnostic figures (per model)
+
+Each model's notebook saves a characteristic figure to [`artifacts/figures/`](../artifacts/figures/)
+(referenced and explained in the consolidated report,
+[`notebooks/16_evaluation_report.ipynb`](../notebooks/16_evaluation_report.ipynb) §7–8). The most
+informative per model:
+
+| Model | Notebook | Key figure(s) | What it shows |
+|---|---|---|---|
+| Popularity | 03 | `eval_popularity_ranking` | strong ranking from popularity alone (the baseline to beat) |
+| Content (TF-IDF) | 04 | `eval_content_error`, `eval_content_ranking` | rating-error spread; weak ranking |
+| Content (Genome) | 10 | `eval_content_genome_error`, `eval_content_genome_ranking` | the genome lift over TF-IDF |
+| Content (Embeddings) | 13 | `eval_content_embed_error`, `eval_content_embed_ranking` | semantic-embedding variant |
+| User-kNN | 05 | `eval_userknn_neighbors`, `eval_userknn_simdist` | neighbour structure + the similarity distribution that explains its heavy fallback |
+| Item-kNN | 06 | `eval_itemknn_graph`, `eval_itemknn_ranking` | item–item neighbour graph; strong classic-CF ranking |
+| SVD | 07 | `eval_svd_factors`, `eval_svd_error` | learned latent item-factor space; tight rating error |
+| Weighted Hybrid | 08 | `eval_weighted_alpha` | the α-sweep (how the fixed blend is chosen) |
+| Stacked Hybrid | 09 | `eval_stacked_coefficients` | learned Ridge weights (SVD + Item-kNN dominate) |
+| LightGCN | 11 | `eval_lightgcn_ranking` | best F1@K (ranking-trained graph CF) |
+| Dual-Head Hybrid | 12 | `eval_dualhead_weights`, `eval_dualhead_ranking` | rating-head coefficients — *how it fuses content + collaborative* |
+
+The aggregate/headline figures (RMSE/MAE bars, F1@10, the rating-vs-ranking scatter, NDCG/AUC,
+segmented RMSE, bootstrap CIs, beyond-accuracy) come from notebook 14 (`08_*`–`21_*`), and the
+practical case-study figures from notebook 15 (`15_cs_*`). All are collected in notebook 16.

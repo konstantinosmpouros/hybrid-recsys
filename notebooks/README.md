@@ -1,8 +1,9 @@
 # notebooks/
 
-Fifteen notebooks executed in order. The first two prepare data/features; then one
+Sixteen notebooks executed in order. The first two prepare data/features; then one
 notebook per model trains **and** evaluates it; four extension notebooks follow; notebook 14
-aggregates the comparison (deep eval), and notebook 15 is a practical user-by-user case study.
+aggregates the comparison (deep eval), notebook 15 is a practical user-by-user case study, and
+notebook 16 is the read-only consolidated evaluation report (all results + every figure).
 
 ## Execution order
 
@@ -10,8 +11,9 @@ aggregates the comparison (deep eval), and notebook 15 is a practical user-by-us
 01_eda → 02_features → 03_baselines → 04_content_based → 05_user_knn
 → 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid
 → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
-→ 14_advanced_eval   (aggregate deep evaluation + comparison)
-→ 15_case_study      (practical user-centric case study)
+→ 14_advanced_eval     (aggregate deep evaluation + comparison)
+→ 15_case_study        (practical user-centric case study)
+→ 16_evaluation_report (consolidated read-only results report)
 ```
 
 All notebooks add `..` (the repo root) to `sys.path` so the `hybrid_recsys`
@@ -72,7 +74,7 @@ Shared eval boilerplate lives in `hybrid_recsys.evaluation.report` (`full_metric
 
 ---
 
-## 10–15 — Extensions, deep eval & case study (additive; the frozen models 03–09 are untouched)
+## 10–16 — Extensions, deep eval, case study & report (additive; the frozen models 03–09 are untouched)
 
 | Notebook | What |
 |---|---|
@@ -82,6 +84,7 @@ Shared eval boilerplate lives in `hybrid_recsys.evaluation.report` (`full_metric
 | `13_semantic_content.ipynb` | A 3rd content model on **sentence-transformer embeddings** (`all-MiniLM-L6-v2`); meaning-aware similarity vs TF-IDF/genome. |
 | `14_advanced_eval.ipynb` | **Aggregate deep evaluation** + comparison leaderboard (see below). |
 | `15_case_study.ipynb` | **Practical user-centric case study** — CB vs CF vs Hybrid on real archetype users (see below). |
+| `16_evaluation_report.ipynb` | **Consolidated read-only report** — all result tables (from `all_metrics.json`) + every valuable figure with commentary (see below). |
 
 ---
 
@@ -121,6 +124,20 @@ Dual-Head**), all derived from a single model-load set (the Dual-Head pulls in t
 
 > **Memory:** loads the Dual-Head's five base models (~14.5 GB RAM). Run with ~15 GB free.
 > Figures are saved with the `15_cs_*` prefix.
+
+---
+
+## 16_evaluation_report.ipynb — Consolidated evaluation report
+
+The single notebook that **gathers every result and figure** from notebooks 01–15 and explains
+each one. **Read-only and lightweight** — it loads `all_metrics.json` for the tables and
+**references the saved figures** (`artifacts/figures/*.png`); it loads **no model** and recomputes
+nothing, so it runs in seconds with no special memory. Sections: §0 protocol, metric definitions and the master results table · §1–2 data & features ·
+§3 rating accuracy (RMSE/MAE) · §4 ranking (P/R/F1/NDCG/AUC@K) · §5 the rating-vs-ranking
+trade-off · §6 beyond-accuracy · §7 **how each hybrid fuses CB+CF** · §8 per-model diagnostic
+gallery · §9 the nb15 case study · §10 verdict · §11 a figure-integrity check (verifies all 41
+referenced figures exist). This is the
+presentation-ready results writeup; run notebooks 03–15 first so the figures exist.
 
 ---
 

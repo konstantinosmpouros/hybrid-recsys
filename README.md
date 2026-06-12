@@ -56,7 +56,8 @@ knowledge_graphs_ass/
 │   ├── 13_semantic_content.ipynb    # extension: content model on sentence-transformer embeddings
 │   ├── 14_advanced_eval.ipynb       # aggregate deep eval: comparison + NDCG/AUC + segmented
 │   │                                #        + diversity + bootstrap CIs + cold-start + full-catalogue
-│   └── 15_case_study.ipynb          # practical case study: CB vs CF vs Hybrid on archetype users
+│   ├── 15_case_study.ipynb          # practical case study: CB vs CF vs Hybrid on archetype users
+│   └── 16_evaluation_report.ipynb   # consolidated read-only report: all results + every figure
 ├── tests/
 │   ├── test_splits.py
 │   └── test_metrics.py
@@ -128,6 +129,7 @@ jupyter notebook
 #    → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
 #    → 14_advanced_eval (aggregate deep eval + comparison)
 #    → 15_case_study (practical CB-vs-CF-vs-Hybrid case study)
+#    → 16_evaluation_report (read-only: all results + every figure)
 
 # 4. Launch the app — TWO processes (backend API + Streamlit UI)
 #    Easiest on Windows: ./run_local.ps1   (starts both)

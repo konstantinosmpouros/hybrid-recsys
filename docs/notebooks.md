@@ -1,9 +1,10 @@
 # Notebooks — The Experimental Pipeline (in depth)
 
-The fifteen notebooks **are** the experiment: they ingest the data, build features, then
+The sixteen notebooks **are** the experiment: they ingest the data, build features, then
 train **and** evaluate one model per notebook, aggregate everything into the comparison and
-deep-evaluation study, and finish with a practical user-by-user case study. This document
-explains what each notebook does, what it reads and writes, and what to look at in its output. For the *model internals* (maths,
+deep-evaluation study, run a practical user-by-user case study, and finish with a read-only
+consolidated report. This document explains what each notebook does, what it reads and writes,
+and what to look at in its output. For the *model internals* (maths,
 hyperparameters, trade-offs) see [`models.md`](models.md); for the honest results assessment
 see [`project-walkthrough.md`](project-walkthrough.md).
 
@@ -22,11 +23,12 @@ see [`project-walkthrough.md`](project-walkthrough.md).
 01_eda → 02_features → 03_baselines → 04_content_based → 05_user_knn
 → 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid
 → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
-→ 14_advanced_eval   (aggregate deep evaluation + comparison)
-→ 15_case_study      (practical user-centric case study)
+→ 14_advanced_eval     (aggregate deep evaluation + comparison)
+→ 15_case_study        (practical user-centric case study)
+→ 16_evaluation_report (consolidated read-only results report)
 ```
 
-Four phases:
+Five phases:
 
 | Phase | Notebooks | Produces |
 |---|---|---|
@@ -34,6 +36,7 @@ Four phases:
 | **Train + evaluate (one per model)** | 03–09 (core) · 10–13 (extensions) | `artifacts/models/*.joblib`, incremental `all_metrics.json` |
 | **Aggregate + deep eval** | 14 | leaderboard, NDCG/AUC, segmented/cold-start/diversity studies, figures |
 | **Practical case study** | 15 | per-user CB-vs-CF-vs-Hybrid recommendations, hit-rates, `15_cs_*` figures |
+| **Consolidated report** | 16 | read-only: all result tables + every valuable figure with commentary |
 
 Each notebook adds the repo root to `sys.path` (`sys.path.insert(0, "..")`) so it can
 `import hybrid_recsys` without a prior `pip install -e .`. All randomness is pinned to
@@ -248,6 +251,31 @@ representative of each family: **CB = Content-Genome, CF = Item-kNN, Hybrid = Du
 
 Read-only: it loads frozen artifacts and does **not** modify `all_metrics.json`. Figures use the
 `15_cs_*` prefix. (See also the app's **Side-by-side** tab for an interactive version of §3.)
+
+---
+
+## Phase 5 — Consolidated report
+
+### `16_evaluation_report.ipynb` — every result, in one place
+
+The presentation-ready writeup. **Read-only and lightweight** — it loads `all_metrics.json` for
+the tables and **references the saved figures** (`artifacts/figures/*.png`); it loads **no model**
+and recomputes nothing, so it runs in seconds with no special memory (handy when the 14 GB deep-eval
+run isn't practical). It gathers ~41 figures produced across notebooks 01–15 and explains each.
+
+- **§0** protocol + metric definitions (incl. NDCG/AUC/coverage/diversity/novelty) + the **master
+  results table** (all 12 models × RMSE/MAE/P/R/F1@{5,10,20}, best-highlighted).
+- **§1–2** data & feature context (EDA + feature-space figures).
+- **§3** rating accuracy (RMSE/MAE table + bars + bootstrap CIs + segmented RMSE).
+- **§4** ranking (P/R/F1 table + F1@10 bars + F1@K curves + NDCG/AUC).
+- **§5** the rating-vs-ranking trade-off scatter (the key insight).
+- **§6** beyond-accuracy · **§7** **how each hybrid fuses CB+CF** (α-sweep, Stacked & Dual-Head
+  coefficients) · **§8** per-model diagnostic gallery · **§9** the nb15 case study · **§10** verdict.
+- **§11** a self-validating figure-integrity check (asserts all referenced figures exist on disk).
+
+It assumes notebooks 03–15 have already been run (so the figures and `all_metrics.json` exist).
+Because it never loads a model, it is the safest notebook to execute and the best one to read first
+for "what were the results?"
 
 ---
 
