@@ -1,9 +1,9 @@
 # Notebooks — The Experimental Pipeline (in depth)
 
-The fourteen notebooks **are** the experiment: they ingest the data, build features, then
-train **and** evaluate one model per notebook, and finally aggregate everything into the
-comparison and deep-evaluation study. This document explains what each notebook does, what
-it reads and writes, and what to look at in its output. For the *model internals* (maths,
+The fifteen notebooks **are** the experiment: they ingest the data, build features, then
+train **and** evaluate one model per notebook, aggregate everything into the comparison and
+deep-evaluation study, and finish with a practical user-by-user case study. This document
+explains what each notebook does, what it reads and writes, and what to look at in its output. For the *model internals* (maths,
 hyperparameters, trade-offs) see [`models.md`](models.md); for the honest results assessment
 see [`project-walkthrough.md`](project-walkthrough.md).
 
@@ -22,16 +22,18 @@ see [`project-walkthrough.md`](project-walkthrough.md).
 01_eda → 02_features → 03_baselines → 04_content_based → 05_user_knn
 → 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid
 → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
-→ 14_advanced_eval   (final: deep evaluation + comparison)
+→ 14_advanced_eval   (aggregate deep evaluation + comparison)
+→ 15_case_study      (practical user-centric case study)
 ```
 
-Three phases:
+Four phases:
 
 | Phase | Notebooks | Produces |
 |---|---|---|
 | **Prepare** | 01–02 | processed parquets, the train/val/test split, item-feature matrices |
 | **Train + evaluate (one per model)** | 03–09 (core) · 10–13 (extensions) | `artifacts/models/*.joblib`, incremental `all_metrics.json` |
 | **Aggregate + deep eval** | 14 | leaderboard, NDCG/AUC, segmented/cold-start/diversity studies, figures |
+| **Practical case study** | 15 | per-user CB-vs-CF-vs-Hybrid recommendations, hit-rates, `15_cs_*` figures |
 
 Each notebook adds the repo root to `sys.path` (`sys.path.insert(0, "..")`) so it can
 `import hybrid_recsys` without a prior `pip install -e .`. All randomness is pinned to
@@ -213,6 +215,39 @@ folded in here:
 
 The figures it exports under `artifacts/figures/` are the same PNGs the app's **Comparison** tab
 serves.
+
+---
+
+## Phase 4 — Practical case study
+
+### `15_case_study.ipynb` — CB vs CF vs Hybrid, user by user *(final)*
+
+The **practical** counterpart to notebook 14. Where 14 answers *"which model is best on
+average?"*, this answers *"does the hybrid actually combine content coherence with
+collaborative accuracy for real users?"* — the heart of the assignment, shown as a story
+rather than a metrics table. Strictly scoped to **CB vs CF vs Hybrid**, using the strongest
+representative of each family: **CB = Content-Genome, CF = Item-kNN, Hybrid = Dual-Head**.
+
+- **Loads once, gets all three.** The Dual-Head's feature vector is built from five base models
+  (`genome-CB, user-kNN, item-kNN, SVD, LightGCN`), so loading it brings the CB and CF baselines
+  into memory too — the comparison is apples-to-apples. **~14.5 GB RAM; run with ~15 GB free.**
+- **§1–2 — four archetype users**, picked reproducibly from their train profiles: *mainstream
+  heavy* (popular taste), *niche specialist* (low genre entropy), *eclectic cinephile* (high
+  entropy), *light/sparse*. Each is required to have held-out test likes as ground truth.
+- **§3 — side-by-side top-10** from CB / CF / Hybrid over a shared candidate pool, each rec
+  annotated: held-out **hit ✅**, **popularity percentile** (exposes CF's popularity bias),
+  **genre overlap** (exposes CB's over-specialisation).
+- **§4 — "would they like it?"**: per-archetype **Precision/Recall/F1/NDCG@10 + AUC** (sampled
+  negatives, same protocol as nb14) on stratified samples, plus per-archetype **RMSE/MAE** on
+  held-out ratings, plus the four named users individually.
+- **§5 — beyond-accuracy** (novelty / intra-list diversity / catalogue coverage per family).
+- **§6 — the blend mechanism**: for the eclectic user, candidate movies where CB and CF disagree
+  (off-taste blockbuster vs niche gem), showing every base signal and the Hybrid's output, plus
+  the Dual-Head's learned **rating-head coefficients** (which signals it leans on).
+- **§7 — verdict + cross-check** against `all_metrics.json` (practical ≈ aggregate ordering).
+
+Read-only: it loads frozen artifacts and does **not** modify `all_metrics.json`. Figures use the
+`15_cs_*` prefix. (See also the app's **Side-by-side** tab for an interactive version of §3.)
 
 ---
 

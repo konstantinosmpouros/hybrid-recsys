@@ -1,8 +1,8 @@
 # notebooks/
 
-Fourteen notebooks executed in order. The first two prepare data/features; then one
-notebook per model trains **and** evaluates it; three extension notebooks follow; the
-last aggregates the comparison.
+Fifteen notebooks executed in order. The first two prepare data/features; then one
+notebook per model trains **and** evaluates it; four extension notebooks follow; notebook 14
+aggregates the comparison (deep eval), and notebook 15 is a practical user-by-user case study.
 
 ## Execution order
 
@@ -10,7 +10,8 @@ last aggregates the comparison.
 01_eda → 02_features → 03_baselines → 04_content_based → 05_user_knn
 → 06_item_knn → 07_svd → 08_weighted_hybrid → 09_stacked_hybrid
 → 10_content_genome → 11_lightgcn → 12_dual_head_hybrid → 13_semantic_content
-→ 14_advanced_eval   (final: deep evaluation + comparison)
+→ 14_advanced_eval   (aggregate deep evaluation + comparison)
+→ 15_case_study      (practical user-centric case study)
 ```
 
 All notebooks add `..` (the repo root) to `sys.path` so the `hybrid_recsys`
@@ -71,7 +72,7 @@ Shared eval boilerplate lives in `hybrid_recsys.evaluation.report` (`full_metric
 
 ---
 
-## 10–14 — Extensions (additive; the frozen models 03–09 are untouched)
+## 10–15 — Extensions, deep eval & case study (additive; the frozen models 03–09 are untouched)
 
 | Notebook | What |
 |---|---|
@@ -79,7 +80,8 @@ Shared eval boilerplate lives in `hybrid_recsys.evaluation.report` (`full_metric
 | `11_lightgcn.ipynb` | **LightGCN** graph CF (PyTorch, BPR loss). Ranking-only (embedding scores aren't ratings). Trains on a user subsample. |
 | `12_dual_head_hybrid.ipynb` | **Dual-head hybrid**: a Ridge rating head (RMSE/MAE) + a logistic rank head (P/R/F1) blended on validation over all base models incl. genome & LightGCN. |
 | `13_semantic_content.ipynb` | A 3rd content model on **sentence-transformer embeddings** (`all-MiniLM-L6-v2`); meaning-aware similarity vs TF-IDF/genome. |
-| `14_advanced_eval.ipynb` | **FINAL** notebook — folds in the comparison **and** the deep eval (see below). |
+| `14_advanced_eval.ipynb` | **Aggregate deep evaluation** + comparison leaderboard (see below). |
+| `15_case_study.ipynb` | **Practical user-centric case study** — CB vs CF vs Hybrid on real archetype users (see below). |
 
 ---
 
@@ -98,6 +100,27 @@ re-training):
 - **G. Full-catalogue** ranking sanity pass.
 
 Deep sections run on bounded samples (config constants at the top of each cell).
+
+---
+
+## 15_case_study.ipynb — Practical case study (CB vs CF vs Hybrid)
+
+The **practical** companion to notebook 14: instead of aggregate metrics, it shows — for real
+users — that the hybrid combines content coherence with collaborative accuracy. Uses the
+strongest representative of each family (**CB = Content-Genome, CF = Item-kNN, Hybrid =
+Dual-Head**), all derived from a single model-load set (the Dual-Head pulls in the CB/CF bases).
+
+- **§1–2** picks four reproducible archetype users (mainstream-heavy / niche-specialist /
+  eclectic / light-sparse) from their train profiles + shows their tastes.
+- **§3** side-by-side top-10 from CB / CF / Hybrid over a shared candidate pool, each rec
+  annotated with held-out hit ✅ / popularity-percentile / genre-overlap.
+- **§4** rigorous hit-rate: per-archetype Precision/Recall/F1/NDCG@10 + AUC (sampled negatives,
+  same protocol as nb14) and RMSE/MAE on held-out ratings.
+- **§5** beyond-accuracy (novelty / diversity / coverage), **§6** the blend mechanism (CB vs CF
+  vs Hybrid scores + the Dual-Head's learned coefficients), **§7** verdict + cross-check vs nb14.
+
+> **Memory:** loads the Dual-Head's five base models (~14.5 GB RAM). Run with ~15 GB free.
+> Figures are saved with the `15_cs_*` prefix.
 
 ---
 
