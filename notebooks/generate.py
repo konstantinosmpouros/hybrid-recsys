@@ -2459,18 +2459,25 @@ save_fig(fig, "15_cs_dual_coefficients")'''),
 
 md("""## 7. Verdict and cross-check
 
-| User type | Best practical fit | Why |
-|---|---|---|
-| **Mainstream heavy** | CF / Hybrid | dense ratings -> CF nails popular taste; Hybrid matches it |
-| **Niche specialist** | CB / Hybrid | content signal finds same-niche gems CF misses |
-| **Eclectic cinephile** | Hybrid | needs both content coherence and collaborative discovery |
-| **Light / sparse** | Hybrid | thin history -> CB content + the hybrid's robustness carry it |
+The stratified results (§4) give a clean verdict per user type - and a stronger headline than
+expected: the **Hybrid wins NDCG@10 *and* AUC in all four archetypes**, has the best RMSE in
+three of four, and is **never the worst on any metric for any user type** - the only family
+with that property.
 
-The **Hybrid is the only family that is never the worst** for any user type - the practical
-restatement of the assignment's thesis. Below we cross-check the per-archetype case-study
-numbers against the aggregate leaderboard (`all_metrics.json`): the populations differ
-(archetype-skewed vs 1,000 random users) so absolute values differ, but the **ordering
-agrees** - practical and aggregate tell the same story."""),
+| User type | F1@10 winner | NDCG@10 / AUC winner | RMSE winner |
+|---|---|---|---|
+| **Mainstream heavy** | CB 0.518 (Hybrid 0.499, 2nd) | **Hybrid** (0.764 / 0.758) | **Hybrid** (0.802) |
+| **Niche specialist** | **Hybrid** (0.435) | **Hybrid** (0.563 / 0.781) | **Hybrid** (0.927) |
+| **Eclectic cinephile** | **Hybrid** (0.472) | **Hybrid** (0.785 / 0.778) | **Hybrid** (0.717) |
+| **Light / sparse** | CF 0.342 (Hybrid 0.323, 2nd) | **Hybrid** (0.632 / 0.810) | CF 0.903 (Hybrid 0.906, 2nd) |
+
+Each parent has a collapse mode the Hybrid avoids: **CB falls apart on the light/sparse band**
+(F1@10 0.154, AUC 0.286 - barely better than random) and posts the worst RMSE in every band;
+**CF is the weakest ranker for the mainstream and niche bands**. The Hybrid tracks the better
+parent everywhere - the practical restatement of the assignment's thesis. Below we cross-check
+the per-archetype case-study numbers against the aggregate leaderboard (`all_metrics.json`):
+the populations differ (archetype-skewed vs 1,000 random users) so absolute values differ, but
+the families land in the same range and tell the same story."""),
 code('''import json
 from hybrid_recsys.config import ARTIFACTS_METRICS
 
@@ -2779,8 +2786,11 @@ Aggregate metrics say *which* model is best; the case study (nb15) shows *why it
 users. It compares the best of each family - **CB = Genome, CF = Item-kNN, Hybrid = Dual-Head** -
 on four archetype users (mainstream / niche / eclectic / light).
 
-> The `15_cs_*` figures below are produced by **notebook 15**; run it on the real models to refresh
-> their values for the final report.
+> The `15_cs_*` figures below come from **executing notebook 15 on the real trained models**.
+> Headline of that run: the **Hybrid wins NDCG@10 and AUC in all four archetypes**, has the
+> best RMSE in three of four, and is **never the worst on any metric for any user type** —
+> the only family with that property. (CB collapses on the light/sparse band — F1@10 0.154,
+> AUC 0.286; CF is the weakest ranker for the mainstream and niche bands.)
 
 **User profiles & what each model recommends.** Side-by-side top-10s, annotated with held-out hits,
 popularity percentile and genre overlap - you can *see* CF skew popular and CB over-specialise.

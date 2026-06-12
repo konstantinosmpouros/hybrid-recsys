@@ -40,8 +40,8 @@ Five headline findings:
    SVD (Δ RMSE −0.0013); the learned meta-models open a real gap (−0.0054 / −0.0080) because they
    *learn* which signals to trust (§7).
 5. **The aggregate story survives per-user scrutiny.** On four contrasting user archetypes
-   (mainstream / niche / eclectic / light), the hybrid is top or co-top everywhere and never the
-   worst (§9).
+   (mainstream / niche / eclectic / light), the hybrid **wins NDCG@10 and AUC in all four**,
+   has the best RMSE in three of four, and is never the worst on any metric (§9).
 
 ---
 
@@ -394,8 +394,15 @@ collaborative signals — the literal "combination of CB + CF" the assignment as
 
 Aggregate metrics say *which* model wins; the case study shows *why it matters for a user*.
 It compares the best of each family — **CB = Content-Genome, CF = Item-kNN, Hybrid =
-Dual-Head** — on four deterministic, reproducible user archetypes (mainstream-heavy /
-niche-specialist / eclectic / light-sparse), each guaranteed held-out ground truth.
+Dual-Head** — on four deterministic, reproducible user archetypes, each guaranteed held-out
+ground truth. The real users it selected (executed on the trained models):
+
+| Archetype | User | Train ratings | Profile signature |
+|---|---|---|---|
+| Mainstream heavy | 142403 | 423 | popular-taste blockbusters (LotR, Pulp Fiction, Memento) |
+| Niche specialist | 62122 | 52 | genre entropy 2.01 — Comedy/Romance/Drama almost exclusively |
+| Eclectic cinephile | 85110 | 384 | genre entropy 3.93 — spread across every major genre |
+| Light / sparse | 194 | 16 | near-cold user, mean rating 2.06 (a harsh, thin profile) |
 
 What it measures, per archetype:
 
@@ -416,12 +423,28 @@ What it measures, per archetype:
 | ![Beyond-accuracy by family](../artifacts/figures/15_cs_beyond_accuracy.png) | ![Blend mechanism](../artifacts/figures/15_cs_blend_mechanism.png) |
 | ![Dual-Head coefficients](../artifacts/figures/15_cs_dual_coefficients.png) | ![Aggregate vs practical](../artifacts/figures/15_cs_agg_vs_practical.png) |
 
-**Conclusion of the study:** the hybrid is top or co-top in every archetype and **never the
-worst** — the only family with that property — and its case-study ordering matches the
-aggregate leaderboard (different user mix, same story). Verdict per user type: mainstream →
-CF/Hybrid; niche → CB/Hybrid; eclectic → Hybrid; light → Hybrid.
+**Results (real-model run, stratified ≤ 40 users per archetype, sampled negatives):**
 
-> The `15_cs_*` figures are produced by running notebook 15 on the real models (~14.5 GB RAM).
+| Archetype | F1@10 winner | NDCG@10 / AUC winner | RMSE winner |
+|---|---|---|---|
+| Mainstream heavy | CB 0.518 (Hybrid 0.499, 2nd) | **Hybrid** (0.764 / 0.758) | **Hybrid** (0.802) |
+| Niche specialist | **Hybrid** (0.435) | **Hybrid** (0.563 / 0.781) | **Hybrid** (0.927) |
+| Eclectic cinephile | **Hybrid** (0.472) | **Hybrid** (0.785 / 0.778) | **Hybrid** (0.717) |
+| Light / sparse | CF 0.342 (Hybrid 0.323, 2nd) | **Hybrid** (0.632 / 0.810) | CF 0.903 (Hybrid 0.906, 2nd) |
+
+**Conclusion of the study:** the **Hybrid wins NDCG@10 *and* AUC in all four archetypes**, has
+the best RMSE in three of four, and is **never the worst on any metric for any user type** —
+the only family with that property. Each parent has a collapse mode the Hybrid avoids: CB falls
+apart on the light/sparse band (F1@10 0.154, AUC 0.286 — barely better than random) and posts
+the worst RMSE in every band; CF is the weakest ranker for the mainstream and niche bands. The
+blend-mechanism panel makes the fusion concrete: for a popular-but-off-taste film (*The
+Haunting*, 98th popularity percentile) CF predicts 2.93 but CB ~0.5 — the Hybrid scores it
+P(like) = 0.17, refusing the popularity bait; for a film both parents like, P(like) = 0.92.
+The case-study mean F1@10 (CB 0.378 / CF 0.414 / Hybrid 0.432) lands in the same range as the
+aggregate leaderboard (0.376 / 0.433 / 0.424) — different user mix, same story.
+
+> All `15_cs_*` figures and numbers above are from executing notebook 15 on the real trained
+> models (not a simulation).
 
 ---
 
