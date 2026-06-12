@@ -123,6 +123,38 @@ notebook 14 (NDCG/AUC, segmented RMSE, beyond-accuracy, bootstrap CIs) served as
 
 ---
 
+## Suggested demo script (for the 10–15 min presentation)
+
+A tight path through the app that hits every assignment requirement — in particular **Ε:
+present results for indicative users from the dataset**. Total ≈ 6–8 minutes of live demo,
+leaving time for slides. Pre-load `content_genome` (~0.25 GB, seconds) before you start; load
+one heavy model only if the machine has RAM to spare.
+
+1. **📊 Comparison (1 min).** Open with the leaderboard — "12 models, one protocol; the
+   learned hybrids win RMSE/MAE, the ranking-trained model wins F1." Show the
+   rating-vs-ranking scatter. *Zero models need to be loaded for this tab.*
+2. **👤 Existing User (2–3 min) — the requirement-Ε moment.** Pick a known archetype user —
+   **142403** (mainstream) or **62122** (niche, Comedy/Romance) — so you can narrate their
+   taste. Get top-10 with `content_genome`; show the recommendations sitting next to their
+   real history; apply a **genre filter** live. Then click a recommendation → **Explain** —
+   "because you rated these similar films highly" + the per-model agreement chart.
+3. **🆕 New User (2 min) — "watch it learn".** Reset, rate 2–3 sci-fi titles 5★ → top-10
+   turns sci-fi; now rate a comedy 5★ and point at the **🆕/▲/▼ badges** and the genre-mix
+   chart shifting. This is the cold-start path (a ratings dict, no userId) — only content
+   models + hybrids appear in this tab, and you can say *why* (predict-signature argument).
+4. **🔍 Movie Explorer (1 min).** Search *The Matrix* → three columns of neighbours
+   (Genome / TF-IDF / Embeddings) → "same algorithm, three representations — the genome's
+   neighbours are visibly better, which is the content finding of the project."
+5. **🎯 Prediction Inspector (1 min, optional).** A (user, movie) with a held-out truth —
+   bars vs the dashed true-rating line.
+6. **Close on 📊** with the F1@10-by-archetype case-study figure: "and per user type, the
+   hybrid is never the worst — NDCG/AUC winner in all four."
+
+Fallback if RAM is tight on the demo machine: the whole script above runs on **content
+models alone** (~0.3 GB each); the Comparison tab carries all 12 models' numbers regardless.
+
+---
+
 ## Running the whole thing
 
 The app needs the backend up first. Three ways:

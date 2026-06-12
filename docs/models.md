@@ -57,6 +57,36 @@ All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evalu
 | **Memory-based / heuristic** (no optimised parameters) | Global Mean, Popularity, Content-Based, User-kNN, Item-kNN | precompute and store something: a mean, counts, normalised feature vectors, or a similarity matrix |
 | **Learned** (parameters fit by minimising a loss) | SVD, Weighted Hybrid, Stacked Hybrid | optimise an objective — latent factors via SGD, the blend weight α, or Ridge coefficients |
 
+### Model lifecycle — fit → save → load → predict
+
+Every model follows the same four-stage life, which is what makes the project composable:
+
+```
+  notebook NN                 artifacts/models/           consumers
+ ─────────────               ──────────────────          ──────────────────────────────
+ model.fit(train data) ──►  model.save()  ──►  <name>.joblib  ──►  Model.load() ──► .predict(…)
+                                                                    ├─ its own notebook: full_metrics(predict_fn) → all_metrics.json
+                                                                    ├─ later hybrids: consumed as a frozen base model (nb08/09/12)
+                                                                    ├─ deep eval / case study (nb14, nb15)
+                                                                    └─ backend RecommenderBundle → FastAPI → Streamlit app
+```
+
+Train **once** in the model's own notebook; everything downstream only `load()`s the frozen
+artifact — no consumer ever re-fits.
+
+**The three predict signatures (the key to cold-start).** All models answer "how would *u*
+rate *i*?", but they need different *evidence* to do it:
+
+| Signature | Models | Evidence needed | Cold-start? |
+|---|---|---|---|
+| `predict(user_ratings: dict, movie_id)` | the 3 content models | only the user's **own ratings dict** — identity-free | ✅ any new user with ≥1 rating |
+| `predict(user_id, movie_id)` | SVD, both kNNs, LightGCN | the user must have been **seen at fit time** (their latent vector / similarity row / embedding) | ❌ unknown user → fallback |
+| composite | Weighted `(u, i, user_ratings)` · Stacked `(u, i, base_preds[4])` · Dual-Head `(feats[8])` | combinations of the above — the caller assembles the inputs | ✅ via their content side |
+
+This is exactly why the app's *New User (live)* tab offers only content models + hybrids: they
+are the ones whose predict signature consumes an in-session ratings dict. Each model section
+below ends with an **I/O card** making its own contract explicit.
+
 ---
 
 ## Shared substrate
@@ -93,6 +123,17 @@ All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evalu
 - **Why it matters.** It's the **RMSE/MAE floor**: any real model must beat predicting the average. RMSE here (≈ 1.06) is essentially the standard deviation of ratings.
 - **Caveats.** Useless as a *ranking* model — every score is identical, so the top-K is arbitrary. Defined inline in notebook 03 (baselines).
 
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | the `train["rating"]` column — nothing else |
+| **Stored state** | one float, `μ ≈ 3.53` |
+| **predict() call** | `(user_id, movie_id) → μ` — both arguments ignored |
+| **Output** | the constant 3.53 (never NaN) |
+| **Trained in → artifact** | nb03, inline lambda — **no `.joblib`**, not served by the app |
+| **Consumed by** | nb03 evaluation only (the RMSE/MAE floor in `all_metrics.json`) |
+
 ## 2. Popularity — naive baseline
 
 - **Philosophy.** "Recommend what everyone watches." A blunt but surprisingly strong **ranking** baseline (popular items really are more often relevant).
@@ -101,6 +142,17 @@ All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evalu
 - **Prediction.** `r̂(u,i) = 0.5 + 4.5 · count(i) / max_count` — a **monotonic** map of popularity onto the rating scale.
 - **Why the mapping.** It lets us compute RMSE/MAE at all; being monotonic, it leaves the *ranking* unchanged. RMSE is meaningless (most movies are rare → predicts ≈ 0.5 vs true ≈ 4), but ranking is informative.
 - **Caveats.** No personalisation — every user gets the same order.
+
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | `train["movieId"]` value counts |
+| **Stored state** | `{movieId: count}` dict + `max_count` |
+| **predict() call** | `(user_id, movie_id) → 0.5 + 4.5·count(i)/max` — the user is ignored |
+| **Output** | popularity mapped onto [0.5, 5]; identical ranking for every user (never NaN) |
+| **Trained in → artifact** | nb03, inline — **no `.joblib`** |
+| **Consumed by** | nb03 evaluation; serving re-derives the same popularity *order* (`_pop_order`) as the retrieval pool for heavy models — but Popularity itself is not a servable model |
 
 ## 3. Content-Based — CB, memory-based
 
@@ -126,6 +178,18 @@ All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evalu
 - **Strengths.** Cold-item friendly; interpretable ("similar because same genres / tags"); needs no other users.
 - **Weaknesses / caveats.** Returns `r̄_u` when the user rated **none** of *j*'s neighbours (frequent → it often behaves like a per-user-mean predictor, which is why its RMSE only just beats Global Mean). Returns `NaN` if the movie is unknown or the user has no history — `NaN` triggers the hybrid fallback and is dropped from ranking. Tends to **over-specialise** (recommends more of the same).
 
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | `item_features.npz` (62,423 × 276 CSR) + `movie_index` — **no ratings at all** |
+| **Stored state** | the L2-normalised dense float32 feature matrix (~70 MB) + `movie_index` + an LRU similarity cache |
+| **predict() call** | `(user_ratings: {movieId: rating}, movie_id) → float \| NaN` — takes the user's **history dict**, not a userId (identity-free → cold-start capable) |
+| **Extra ops** | `neighbors(movie_id, k)` and `similarity_to(movie_id, ids)` — power the Movie Explorer and the "why this?" explanations |
+| **Output** | rating ∈ [0.5, 5] · `r̄_u` if no rated neighbours · NaN if unknown movie / empty history |
+| **Trained in → artifact** | nb04 → `content_model.joblib` (~0.4 GB resident) |
+| **Consumed by** | Weighted Hybrid (as its `cb_model`), Stacked Hybrid (base), serving key `content`, Movie Explorer "TF-IDF" column |
+
 ## 4. User-Based k-NN — CF, memory-based
 
 [`models/collaborative.py`](../hybrid_recsys/models/collaborative.py)
@@ -143,6 +207,17 @@ All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evalu
 - **Hyperparameters.** `k = 80`, `min_k = 5` (need ≥ 5 neighbours or it backs off toward the mean).
 - **Complexity / memory caveat.** A full 162K-user similarity matrix ≈ **98 GB**, so the model **samples 20K users (seeded)** before fitting (→ ~1.6 GB). Consequence: a test user outside that sample is *unknown*, and Surprise returns the **baseline mean**. Empirically ~90% of test predictions are this fallback — so user-kNN's reported numbers largely reflect the baseline, not genuine user-CF. (This also inflates its ranking via constant-output ties; see the tie-break note in the evaluation.)
 
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | train ratings of a seeded **20K-user sample**, wrapped into a Surprise `Dataset` (ids cast to `str`, `rating_scale=(0.5, 5.0)`) |
+| **Stored state** | the 20K × 20K Pearson-baseline similarity matrix **plus the full Surprise trainset** (the reason it rehydrates to ~3.5 GB) |
+| **predict() call** | `(user_id, movie_id) → float` — the user must be one of the 20K sampled |
+| **Output** | rating ∈ [0.5, 5]; **never NaN** (global-mean fallback for unknowns, `r̄_u` under `min_k`) |
+| **Trained in → artifact** | nb05 → `user_knn_model.joblib` |
+| **Consumed by** | Stacked + Dual-Head hybrids (base signal), serving key `user_knn` |
+
 ## 5. Item-Based k-NN — CF, memory-based
 
 [`models/collaborative.py`](../hybrid_recsys/models/collaborative.py)
@@ -157,6 +232,17 @@ All of these are implemented in [`evaluation/metrics.py`](../hybrid_recsys/evalu
 
 - **Memory caveat.** Full 62K-item matrix ≈ **15 GB**, so it **caps to the 15K most-rated items** (→ ~900 MB). Because ratings concentrate on popular titles, this cap barely reduces coverage — which is exactly why item-kNN's RMSE (≈ 0.83) is far better than user-kNN's (≈ 1.04): the item cap rarely bites, the user cap bites hard.
 - **Strengths.** Robust, strong RMSE; the most reliable pure-CF model here.
+
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | train ratings filtered to the **15K most-rated movies**, as a Surprise `Dataset` |
+| **Stored state** | the 15K × 15K Pearson-baseline similarity matrix **plus the Surprise trainset** (~3 GB resident) |
+| **predict() call** | `(user_id, movie_id) → float` — any train user; movie must be in the 15K cap |
+| **Output** | rating ∈ [0.5, 5]; **never NaN** (global-mean fallback outside the cap, `r̄_i` under `min_k`) |
+| **Trained in → artifact** | nb06 → `item_knn_model.joblib` |
+| **Consumed by** | Stacked + Dual-Head hybrids (base), serving key `item_knn`, the **CF representative** in the nb15 case study |
 
 ### What Surprise actually does at predict time (both kNN models)
 
@@ -207,6 +293,17 @@ models — a distinction that drives the hybrid fallback logic (see the
 - **Complexity.** Training ≈ O(`n_epochs` × `#ratings` × `n_factors`); prediction is one dot product.
 - **Strengths / weaknesses.** Best single model on RMSE/MAE (learns global structure, generalises to sparse users). Weaker on *ranking* — it minimises rating error, not the goal of pushing a few relevant items above many random ones.
 
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | the **full** train ratings as a Surprise `Dataset`; hyper-params picked by `GridSearchCV(cv=5)` over 24 candidates |
+| **Stored state** | `p_u` (n_users × k), `q_i` (n_items × k), `b_u`, `b_i`, `μ` **plus the Surprise trainset** — small maths, big object (~6.9 GB resident) |
+| **predict() call** | `(user_id, movie_id) → μ + b_u + b_i + q_iᵀp_u` |
+| **Output** | rating ∈ [0.5, 5]; **never NaN** (bias-only fallback for unknown user/item) |
+| **Trained in → artifact** | nb07 → `svd_model.joblib` |
+| **Consumed by** | **all three hybrids** as the CF backbone (Weighted embeds it; Stacked & Dual-Head call it), serving key `svd` |
+
 ## 7. Weighted Hybrid — CB + CF by fixed blend
 
 [`models/hybrid.py`](../hybrid_recsys/models/hybrid.py)
@@ -222,6 +319,17 @@ models — a distinction that drives the hybrid fallback logic (see the
 
 - **Back-stage.** If CB returns `NaN` (cold item / no history) → falls back to the pure SVD prediction, so the hybrid never fails where SVD succeeds.
 - **Trade-off.** Transparent and safe, but a *single global* weight can't adapt per user/item — which motivates stacking.
+
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | the **already-trained** SVD + CB objects (`set_models`) and, for `tune_alpha`, the validation df + `user_ratings_map` |
+| **Stored state** | `α ≈ 0.9` **plus the entire SVD and CB objects embedded inside it** — which is why this tiny model rehydrates to ~7.2 GB |
+| **predict() call** | `(user_id, movie_id, user_ratings) → float` — the only model taking all three (its CF side needs the id, its CB side needs the history dict) |
+| **Output** | rating ∈ [0.5, 5]; never NaN (CB-NaN → pure SVD) |
+| **Trained in → artifact** | nb08 → `weighted_hybrid.joblib` |
+| **Consumed by** | serving key `weighted`; nb14. Self-contained — needs **no** other model loaded |
 
 ## 8. Stacked Hybrid — CB + CF by learned meta-model
 
@@ -243,6 +351,18 @@ models — a distinction that drives the hybrid fallback logic (see the
   OOF is the crucial trick: training the meta-model on *in-sample* base predictions would leak (each base model is overconfident on data it trained on), inflating the meta-weights.
 - **Prediction.** Base models retrained on full train → build the 7 features for `(u,i)` → push through Ridge → clip to [0.5, 5.0]. Side features (`item_popularity`, counts, `global_mean`) are stored on the object so it scores standalone at serving time. Returns `global_mean` if any base prediction is `NaN`.
 - **Result / interpretability.** The learned coefficients lean on **SVD** and **Item-kNN**, and drive the weak **User-kNN toward 0** — i.e. the meta-model *discovered* which signals to trust. On the test set it is the **best of the eight core models on RMSE (0.8054)** and a strong all-rounder on ranking (F1@10 ≈ 0.42); only the extension Dual-Head edges its RMSE.
+
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | the 7-column **OOF** feature matrix + true train ratings `y`; then `set_side_features(item_pop, user_cnt, item_cnt, global_mean)` attaches the lookups |
+| **Stored state** | 7 Ridge coefficients + the three side-feature dicts + `global_mean` — a **tiny** artifact (~0.05 GB)… |
+| **…but serving needs** | the 4 base models **loaded alongside it** (content + user-kNN + item-kNN + SVD ≈ 13.8 GB) because the caller must produce `base_preds` |
+| **predict() call** | `predict_one(user_id, movie_id, base_preds: ndarray[4]) → float` — the **caller** supplies `[cb, user_knn, item_knn, svd]` predictions; the model adds its own side features |
+| **Output** | rating ∈ [0.5, 5]; `global_mean` if any base pred is NaN |
+| **Trained in → artifact** | nb09 → `stacked_hybrid.joblib` |
+| **Consumed by** | serving key `stacked` (deps resolved automatically), nb14 |
 
 ---
 
@@ -279,6 +399,17 @@ representation), one brings a **graph** learner, and one is a second hybrid that
 - **Caveats.** Genome coverage is incomplete (older/obscure titles lack scores) — those
   movies revert to genre-only. Still cold-item friendly and interpretable.
 
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | `item_features_genome.npz` (genre ⊕ TruncatedSVD(genome), 276-dim) + its own `movie_index_genome` |
+| **Stored state** | same as the TF-IDF content model — normalised feature matrix + index + cache (~0.25 GB) |
+| **predict() call** | identical contract: `(user_ratings dict, movie_id) → float \| NaN` |
+| **Output** | rating ∈ [0.5, 5] · NaN per the content semantics |
+| **Trained in → artifact** | nb10 → `content_genome_model.joblib` |
+| **Consumed by** | **Dual-Head base**, serving key `content_genome`, the **"why this?" explain engine**, Movie Explorer "Genome" column, the **CB representative** in nb15 |
+
 ## 10. LightGCN — graph CF, learned (BPR) · *extension*
 
 [`models/lightgcn.py`](../hybrid_recsys/models/lightgcn.py)
@@ -312,6 +443,17 @@ representation), one brings a **graph** learner, and one is a second hybrid that
   exactly what it's designed to. **Caveat:** it can only score items inside its training
   subgraph, so its candidate vocabulary is restricted; in the app, heavy models like this use
   **two-stage retrieval** (popularity-pooled top-3000, then re-rank).
+
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | `train[["userId","movieId"]]` only — **implicit feedback** (which pairs exist, not the rating values), subsampled to 10K users. PyTorch needed *only* here |
+| **Stored state** | `user_map` / `item_map` id dicts + two **numpy** embedding matrices (64-dim) — serving needs no torch (~0.2 GB) |
+| **predict() call** | `(user_id, movie_id) → eᵤ · eᵢ` |
+| **Output** | an **unbounded relevance score**, not a rating (`ranking_only=True`) · **NaN** for any out-of-graph user/item |
+| **Trained in → artifact** | nb11 → `lightgcn_model.joblib` |
+| **Consumed by** | **Dual-Head base** (its NaN gets median-imputed), serving key `lightgcn` (pooled retrieval, scores shown as relevance — never stars) |
 
 ## 11. Dual-Head Hybrid — CB + CF, two learned heads · *extension*
 
@@ -352,6 +494,18 @@ representation), one brings a **graph** learner, and one is a second hybrid that
 - **Trade-off.** More moving parts than the Weighted/Stacked hybrids and depends on five base
   models being loadable — which is why it is the most memory-hungry model to serve.
 
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | the 8-column feature matrix built **on the validation split** over frozen bases + the true val ratings (Ridge head on `r`, logistic head on `r ≥ 4`); per-feature **medians** learned for NaN imputation |
+| **Stored state** | two sklearn heads (`rating_head`, `rank_head`) + the `impute_` median vector — **tiny** (~0.05 GB)… |
+| **…but serving needs** | **all five base models loaded** (genome-CB + user-kNN + item-kNN + SVD + LightGCN ≈ 13.9 GB) because the caller builds the feature vector |
+| **predict() call** | `predict_rating_one(feats[8]) → rating` · `rank_score_one(feats[8]) → P(like)` — the **caller** assembles `feats` in the exact training order (see serving's `_dual_feats`) |
+| **Output** | rating ∈ [0.5, 5] **and** a probability ∈ [0, 1]; never NaN (imputation guarantees a complete vector) |
+| **Trained in → artifact** | nb12 → `dual_head_hybrid.joblib` |
+| **Consumed by** | serving key `dual` (the app's **default** recommender, pooled retrieval), the **Hybrid representative** in nb15 |
+
 ## 12. Content-Based (Semantic Embeddings) — CB, memory-based · *extension*
 
 [`models/content.py`](../hybrid_recsys/models/content.py) · [`pipeline/features.py`](../hybrid_recsys/pipeline/features.py) (`build_item_features_embedding`)
@@ -369,6 +523,17 @@ representation), one brings a **graph** learner, and one is a second hybrid that
   model**. The honest finding: a curated relevance signal (genome) beats a general-purpose
   embedding *here*, because the genome was built specifically to describe these movies. The
   three content spaces are compared side-by-side in the app's **Movie Explorer**.
+
+**I/O card**
+
+| | |
+|---|---|
+| **fit() input** | a 384-dim **L2-normalised sentence-transformer matrix** (`all-MiniLM-L6-v2` encoding of `"title \| genres: … \| tags: …"`) + `movie_index`. The transformer is needed only at feature-build time — never at serve time |
+| **Stored state** | same class as #3 — normalised feature matrix + index + cache (~0.45 GB) |
+| **predict() call** | identical contract: `(user_ratings dict, movie_id) → float \| NaN` |
+| **Output** | rating ∈ [0.5, 5] · NaN per the content semantics |
+| **Trained in → artifact** | nb13 → `content_embed_model.joblib` |
+| **Consumed by** | serving key `content_embed`, Movie Explorer "Embeddings" column |
 
 ---
 

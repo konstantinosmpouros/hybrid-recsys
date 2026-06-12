@@ -216,6 +216,70 @@ Comparison tab renders these.
 
 ---
 
+## Anatomy of a request — `POST /api/recommend`, end to end
+
+What actually happens between the HTTP call and the JSON answer (the other model endpoints
+follow the same skeleton):
+
+```
+POST /api/recommend  {"user_id": 142403, "model": "dual", "k": 10, "genres": ["Sci-Fi"]}
+ │
+ 1. require_data        → 503 if the catalogue is still loading (boot window)
+ 2. _require_loaded     → 409 {not_loaded} if "dual" isn't in RAM yet (click Load first)
+ 3. _resolve            → user 142403's train-ratings dict from `train_ratings`
+ │                        (or, for a cold-start body, the in-session {movieId: rating} map)
+ 4. candidate retrieval → "dual" is a heavy model (_POOLED_MODELS) → take the top-3000
+ │                        most-popular movies the user hasn't seen, instead of all 62K
+ 5. _filter_candidates  → drop candidates not matching the genre/year filters
+ 6. _build_dispatch     → the {key: predict_fn} map, containing ONLY loaded models;
+ │                        for "dual" the fn builds the 8-feature vector (_dual_feats:
+ │                        genome-CB, user-kNN, item-kNN, SVD, LightGCN + side features)
+ │                        and calls dual.predict_rating_one(...)
+ 7. score loop          → predict every candidate; drop NaN; sort descending
+ 8. top-N + metadata    → join titles/genres/year; add predicted_rating unless the
+                          model is ranking_only → JSON out
+```
+
+Notes that matter in practice: step 4 is why the Dual-Head answers in ~seconds instead of
+minutes (each of its scores costs five base-model calls); step 6 is why an unloaded model can
+never be reached by accident; and `/api/recommend/compare` simply runs steps 3–8 once per
+requested model, marking unloaded ones inline instead of failing the whole call.
+
+## Try it from the terminal (curl)
+
+With the backend on `localhost:8000` (compose maps it to host **8806** — substitute accordingly):
+
+```bash
+curl localhost:8000/api/health                       # {status, data_ready, loaded[], …}
+curl localhost:8000/api/models                       # availability + RAM cost per model
+curl -X POST localhost:8000/api/models/content_genome/load     # load a model (small, ~10 s)
+
+# existing dataset user → top-5
+curl -X POST localhost:8000/api/recommend -H "Content-Type: application/json" \
+  -d '{"user_id": 142403, "model": "content_genome", "k": 5}'
+
+# cold-start user → ratings dict instead of user_id (content models + hybrids only)
+curl -X POST localhost:8000/api/recommend -H "Content-Type: application/json" \
+  -d '{"ratings": {"296": 5.0, "318": 4.5, "858": 5.0}, "model": "content_genome", "k": 5}'
+
+# every loaded model's prediction vs the held-out truth for one (user, movie)
+curl "localhost:8000/api/predict?user_id=142403&movie_id=296"
+
+# why was this recommended?
+curl -X POST localhost:8000/api/explain -H "Content-Type: application/json" \
+  -d '{"user_id": 142403, "movie_id": 296, "model": "content_genome"}'
+
+curl "localhost:8000/api/movies/search?q=matrix&limit=3"
+curl "localhost:8000/api/movies/2571/similar?space=genome&k=5"
+```
+
+A failed-load probe is equally informative: requesting a model that doesn't fit returns the
+**507** body with `needed_gb` / `free_gb` / `freeable_gb`, and a recommend against an unloaded
+model returns the **409** `not_loaded` body — the same objects the Streamlit UI renders as
+warnings and Load buttons.
+
+---
+
 ## Running it
 
 ```bash
