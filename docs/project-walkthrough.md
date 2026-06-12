@@ -4,11 +4,16 @@ A complete, honest explanation of what we built, why, whether it works, and what
 we could do. Written against the actual source and the results in
 `artifacts/metrics/all_metrics.json`.
 
-> **Two things to fix before submission (flagged up front):**
-> 1. The **Stacked Hybrid is missing from `all_metrics.json`** — notebook 03 wasn't
->    fully re-run after that model was fixed (only 7 of 8 models are in the results).
-> 2. The **ranking (F1@K) numbers have a tie-ordering artifact** that makes a constant
->    predictor "win" — fixable with a candidate shuffle. See §7.
+> **Status (updated).** The two issues an earlier draft of this document flagged are now
+> **fixed**, and the project has grown from 8 models / 3 notebooks to **12 models / 14
+> notebooks**:
+> - The **Stacked Hybrid is in `all_metrics.json`** (all 12 models present), and the
+>   **ranking tie-ordering artifact is fixed** (candidates are now shuffled before sorting,
+>   so a constant predictor no longer "wins"). The §7 results below are the corrected numbers.
+> - The **tag genome is now used** as a content feature (notebook 10), which delivered the
+>   single biggest content lift in the project.
+> - Companion docs: model internals → [`models.md`](models.md); per-notebook detail →
+>   [`notebooks.md`](notebooks.md); serving → [`backend.md`](backend.md) · [`app.md`](app.md).
 
 ---
 
@@ -56,13 +61,18 @@ Six raw CSVs: `ratings`, `movies`, `tags`, `genome-scores`, `genome-tags`, `link
 - **Temporal trend** — rating volume grows over time → a **temporal split** is the honest
   protocol (a random split would leak the future into training).
 
-> ⚠️ The **tag genome** (1,128 relevance scores/movie) is profiled in EDA but **never used
-> as a model feature** — content features come from free-text tags only. That is unused
-> signal (see §8).
+> The **tag genome** (1,128 relevance scores/movie) is profiled in EDA. The *core* content
+> model (notebook 04) uses free-text tags only; the genome was later wired into a **second
+> content model** (notebook 10), which gave the biggest content lift in the project
+> (RMSE 1.046 → 0.967). So the genome signal is now used — see §5 and [`models.md`](models.md) §9.
 
 ---
 
-## 3. The three notebooks
+## 3. The notebooks
+
+Fourteen notebooks, run in order — full per-notebook detail in [`notebooks.md`](notebooks.md).
+The shape: **prepare** (01–02) → **one notebook per model that trains *and* evaluates it**
+(03–09 core, 10–13 extensions) → **aggregate + deep eval** (14).
 
 - **`01_eda.ipynb` — Explore & split.** Loads CSVs, profiles everything above, then
   produces the **user-wise temporal 80/10/10 split**: each user's ratings sorted by time,
@@ -71,9 +81,15 @@ Six raw CSVs: `ratings`, `movies`, `tags`, `genome-scores`, `genome-tags`, `link
   identically.
 - **`02_features.ipynb` — Build item features.** Turns each movie into a vector (§4).
   Saves the feature matrix + fitted transformers so serving never re-fits.
-- **`03_train_evaluate.ipynb` — Train all 8 models & evaluate once.** The heart of the
-  project: trains every model, evaluates exactly once on the untouched test set under a
-  leak-free protocol, writes `all_metrics.json`, saves all models for the app.
+- **`03`–`09` — one model per notebook.** Each trains + saves a model, then evaluates it
+  exactly once on the untouched test set under a leak-free protocol and appends to
+  `all_metrics.json`: baselines (03), Content-Based (04), User-kNN (05), Item-kNN (06),
+  SVD (07), Weighted Hybrid (08), Stacked Hybrid (09).
+- **`10`–`13` — extensions (additive; 03–09 stay frozen).** Content-Genome (10), LightGCN (11),
+  Dual-Head Hybrid (12), Content-Embeddings (13).
+- **`14_advanced_eval.ipynb` — the final notebook.** Loads everything and produces the
+  comparison leaderboard **plus** deep eval (NDCG/AUC, segmented RMSE, coverage/diversity/novelty,
+  bootstrap CIs, cold-start, full-catalogue sanity) — no re-training.
 
 ---
 
@@ -93,8 +109,9 @@ Similarity between two movies = **cosine similarity** of these vectors.
 
 ## 5. The models
 
-We built **8** (the assignment requires 3: one CB, one CF, one hybrid — so this is well
-over-spec):
+We built **12** (the assignment requires 3: one CB, one CF, one hybrid — so this is well
+over-spec). The first 8 are the core; 9–12 are additive extensions. Full internals in
+[`models.md`](models.md).
 
 | # | Model | Family | One-liner |
 |---|---|---|---|
@@ -106,6 +123,10 @@ over-spec):
 | 6 | **SVD** | CF | matrix factorization with bias terms |
 | 7 | **Weighted Hybrid** | hybrid | `α·SVD + (1−α)·CB` |
 | 8 | **Stacked Hybrid** | hybrid | Ridge meta-learner over all base predictions |
+| 9 | Content (Genome) | CB · *ext* | content model on the tag genome (the big content lift) |
+| 10 | LightGCN | graph CF · *ext* | message passing on the user–item graph, BPR loss (ranking-only) |
+| 11 | **Dual-Head Hybrid** | hybrid · *ext* | Ridge rating head + logistic rank head over 5 base models |
+| 12 | Content (Embeddings) | CB · *ext* | content model on sentence-transformer embeddings |
 
 **Content-Based** — predicts via a *mean-centred weighted average*:
 `r̂(u,j) = r̄_u + Σ sim(i,j)·(r_{u,i} − r̄_u) / Σ|sim|`, over the top-50 content-similar
@@ -144,70 +165,86 @@ Grid-searched by 5-fold CV.
 
 ## 7. Is it good? — the honest assessment
 
-### Rating accuracy (RMSE/MAE) — ✅ clean, sensible, publishable
+*(Numbers below are the current, corrected results from `all_metrics.json` — after the
+tie-break fix and with all 12 models present. The full P/R/F1@K table is in
+[`models.md`](models.md#results-on-the-held-out-test-set).)*
+
+### Rating accuracy (RMSE/MAE) — ✅ clean, sensible, the hybrids lead
 
 | Model | RMSE | MAE |
 |---|---|---|
-| **Weighted Hybrid** | **0.8096** | **0.6074** |
-| SVD | 0.8109 | 0.608 |
+| **Dual-Head Hybrid** *(ext)* | **0.8028** | 0.6031 |
+| **Stacked Hybrid** | 0.8054 | **0.6029** |
+| Weighted Hybrid | 0.8095 | 0.6074 |
+| SVD | 0.8108 | 0.608 |
 | Item-kNN | 0.8336 | 0.6223 |
+| Content (Genome) *(ext)* | 0.9670 | 0.7091 |
+| Content (Embeddings) *(ext)* | 1.0292 | 0.7647 |
 | User-kNN | 1.0401 | 0.8119 |
-| Content-Based | 1.0462 | 0.7831 |
+| Content-Based (TF-IDF) | 1.0462 | 0.7831 |
 | Global Mean | 1.0609 | 0.8339 |
 | Popularity | 2.712 | 2.4856 |
 
-Textbook and defensible: **SVD dominates**, the **Weighted Hybrid edges it out
-marginally** (0.8096 vs 0.8109), kNN and CB are mid, naive baselines worst. Good report
-story: *the hybrid is at least as good as the best single model.*
+This is exactly the story the assignment wants: **both learned hybrids beat every CB-only
+and CF-only baseline** on RMSE *and* MAE. The ordering is textbook — hybrids > SVD > Item-kNN
+> content > user-kNN > naive baselines.
 
-Caveat: the hybrid beats SVD by **0.0013 RMSE** — basically nothing — because α tuned
-almost entirely toward SVD (the CB signal is weak/noisy), so the "hybrid" is ~95% SVD.
-Honest framing: *the hybrid doesn't hurt and adds cold-start coverage, but on this data CF
-alone already captures most of the signal.*
+Two honest caveats: (a) the **Weighted Hybrid** beats SVD by only ~0.001 RMSE, because α tuned
+almost entirely toward SVD (the TF-IDF content signal is weak), so it is ~90% SVD — it doesn't
+*hurt* and adds cold-start coverage, but the lift is marginal. (b) The **Stacked and Dual-Head**
+hybrids open a clearer gap precisely because they bring in *better* signals (Item-kNN, the genome
+content model, LightGCN) and *learn* the weights — the meta-learner is what makes the hybrid
+genuinely better than its best single base, not just a tie.
 
-### Ranking (F1@K) — ⚠️ misleading as computed
+### Ranking (F1@K) — ✅ now sensible (tie-break fixed)
 
 | Model | F1@10 |
 |---|---|
-| Global Mean | 0.5806 |
-| User-kNN | 0.5539 |
-| Popularity | 0.52 |
-| Content-Based | 0.4696 |
-| Item-kNN | 0.3702 |
-| Weighted Hybrid | 0.2967 |
-| SVD | 0.2947 |
+| **LightGCN** *(ext, ranking-only)* | **0.621** |
+| Popularity | 0.609 |
+| Item-kNN | 0.433 |
+| Dual-Head Hybrid *(ext)* | 0.424 |
+| Stacked Hybrid | 0.418 |
+| Content (Genome) *(ext)* | 0.376 |
+| Weighted Hybrid | 0.354 |
+| SVD | 0.352 |
+| Content (Embeddings) *(ext)* | 0.320 |
+| Content-Based (TF-IDF) | 0.207 |
+| User-kNN | 0.122 |
+| Global Mean | 0.076 |
 
-This looks **backwards** — a constant predictor "wins" and the best-RMSE models rank
-worst. Two reasons, one of which is a bug:
+After the fix this ranks the way it should: the **ranking-trained graph model (LightGCN) wins**,
+the personalised CF/hybrid models cluster in the strong middle, and the constant predictor
+(Global Mean) is correctly at the **bottom** (0.076, not the inflated 0.58 an earlier buggy run
+reported). Two things to keep stating honestly:
 
-1. **Tie-ordering artifact (genuine bug).** In `evaluate_ranking_sampled`, candidates are
-   built as `relevant_items + negatives` — relevant ones first. Python's sort is *stable*,
-   so when a model outputs **identical scores** (Global Mean gives everything ~3.5;
-   User-kNN/CB fall back to user-mean constantly), ties break by original order →
-   **relevant items float to the top for free**, inflating P/R/F1. Models with genuinely
-   varied scores (SVD) get no such gift, so their "honest" ranking looks worse.
-   **Fix:** shuffle candidates before sorting, or add a random tie-break.
-2. **A real phenomenon worth stating anyway:** RMSE-optimal ≠ ranking-optimal. SVD
-   minimizes squared error but isn't trained to *push the few relevant items above 100
-   randoms*. A classic result — motivates ranking-first methods (BPR, learning-to-rank,
-   GNNs).
+1. **Popularity's high F1 is an artifact of the protocol, not personalisation.** In sampled
+   negatives, popular titles genuinely are relevant more often, so a popularity sort scores
+   well — but its RMSE (2.71) shows it predicts nothing user-specific. It's a baseline to beat
+   on *both* axes, which the hybrids do.
+2. **LightGCN's win comes with a coverage caveat.** It only scores items inside its training
+   subgraph (10K-user subsample), so its candidate pool is narrower than the rating models'.
+   It's the right tool for ranking, but not directly comparable on RMSE (it has none).
+3. **RMSE-optimal ≠ ranking-optimal** remains the real lesson: SVD minimises squared error, not
+   "push the few relevant items above 100 randoms," which is why a ranking-loss model (LightGCN)
+   and the dual-head's dedicated rank head do better on F1. (Notebook 14 corroborates with
+   NDCG@K and AUC.)
 
-### Action items before submission
+### What was fixed since the first draft
 
-1. **Re-run notebook 03** — the Stacked Hybrid is absent from `all_metrics.json` (7 of 8
-   models shown).
-2. **Fix the ranking tie-break** (shuffle candidates) and regenerate — otherwise a grader
-   will immediately ask why Global Mean "wins" ranking.
-3. Consider reporting **NDCG** or **AUC** alongside F1@K — standard and less brittle to
-   ties.
+All three action items an earlier draft flagged are **done** (see [`CLAUDE.md`](../CLAUDE.md)
+"Known bugs → Fixed"): the **Stacked Hybrid is in the results** (all 12 models present), the
+**ranking tie-break is fixed** (candidates shuffled before the stable sort), and **NDCG@K + AUC**
+are reported alongside F1@K in notebook 14.
 
 ### Overall verdict
 
-The *engineering* is genuinely strong (clean library, leak-free protocol, memory-aware CF,
-two hybrid strategies, a working app — well beyond the minimum). The *rating-accuracy*
-results are solid and tell a clean story. The *ranking* evaluation has a fixable bug that
-currently makes its headline numbers indefensible. Fix that and re-run, and this is a very
-good submission.
+The *engineering* is genuinely strong — a clean installable library, a leak-free protocol,
+memory-aware CF, four hybrid/extension strategies, and a working two-tier app, well beyond the
+3-model minimum. The *rating-accuracy* results are solid and tell the exact story the assignment
+asks for (hybrids beat every single-family baseline). The *ranking* evaluation, after the
+tie-break fix, is now defensible and even pedagogically nice (it shows why ranking-first methods
+win on ranking). This is a strong submission.
 
 ---
 
@@ -225,11 +262,12 @@ bipartite graph:
 
 - **Heuristics:** Common Neighbors, Jaccard, Adamic-Adar (exactly Θέμα 1's option 2).
 - **Node embeddings:** Node2Vec / DeepWalk → train a classifier on node-pair features.
-- **Graph Neural Networks (current SOTA for CF):** **LightGCN**, NGCF, PinSage, GraphSAGE —
-  learn user/item embeddings by message-passing over the interaction graph and optimize a
-  *ranking* loss (BPR). These typically **beat plain matrix factorization on ranking
-  metrics** — exactly where this pipeline is weak. The single highest-impact upgrade for
-  better Precision/Recall@K.
+- **Graph Neural Networks (current SOTA for CF):** **LightGCN** (✅ **implemented** — notebook
+  11), NGCF, PinSage, GraphSAGE — learn user/item embeddings by message-passing over the
+  interaction graph and optimize a *ranking* loss (BPR). These typically **beat plain matrix
+  factorization on ranking metrics** — and indeed our LightGCN posts the **best F1@10 in the
+  project (≈ 0.62)**, confirming the thesis. Remaining headroom: train it on the full user set
+  (we subsample 10K) on a GPU.
 
 ### Neo4j specifically
 
@@ -253,9 +291,9 @@ course name.
 
 ### Non-graph improvements (smaller effort, on-topic for Θέμα 2)
 
-- **Use the tag genome** — it's loaded but unused. 1,128 dense relevance scores/movie would
-  give a much richer content signal than free-text tags, likely making CB (and thus the
-  hybrid) genuinely contribute instead of being drowned by SVD.
+- **Use the tag genome** — ✅ **done** (notebook 10). The 1,128 dense relevance scores/movie
+  gave a much richer content signal than free-text tags (RMSE 1.046 → 0.967) and feed the
+  Dual-Head Hybrid as its content base.
 - **Optimize for ranking, not RMSE** — switch SVD → **BPR** (Bayesian Personalized
   Ranking) or add a learning-to-rank meta-model. Directly addresses the poor F1.
 - **Neural CF / autoencoders** — NCF, Mult-VAE, or Factorization Machines (libFM) as extra
@@ -267,8 +305,18 @@ course name.
 
 ## 9. Suggested next steps (priority order)
 
-1. **(correctness)** Fix the ranking tie-break (shuffle candidates) and re-run notebook 03
-   so the table is honest and includes the Stacked Hybrid.
-2. **(lift)** Wire the tag genome into the content features for a real hybrid contribution.
-3. **(extension)** Prototype a graph/Neo4j or LightGCN approach for a ranking-optimized
-   comparison.
+**Already done** (were the top-3 in an earlier draft): ✅ ranking tie-break fixed + all 12
+models in the results · ✅ tag genome wired into content features (notebook 10, the biggest
+content lift) · ✅ a ranking-optimised graph learner built (LightGCN, notebook 11) — plus
+NDCG/AUC and a deep-eval study (notebook 14).
+
+Remaining ideas, if the project were taken further:
+
+1. **(lift)** Replace SVD with **BPR** (a ranking loss) as a base model, or add a
+   learning-to-rank meta-head — directly targets the metric the rating models are weakest on.
+2. **(scale)** Train LightGCN on the **full** user set (not the 10K subsample) on a GPU, to
+   remove its candidate-coverage caveat and see its true ceiling.
+3. **(extension)** A **Neo4j / GDS** knowledge-graph version (Node Similarity, Link-Prediction
+   pipelines, personalised PageRank) — turnkey for the graph framing in §8.
+4. **(serving)** Slim the Surprise models for serving (drop the retained trainset post-fit) so
+   the big CF models fit alongside each other instead of one-at-a-time.

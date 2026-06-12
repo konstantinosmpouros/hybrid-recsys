@@ -12,12 +12,17 @@
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
+# Startup PRELOAD set. Default = none: models load on demand (click "Load" in the
+# UI), which keeps memory low. Set RECSYS_MODELS=lite/all to preload a set instead.
+if (-not (Test-Path env:RECSYS_MODELS)) { $env:RECSYS_MODELS = "" }
+Write-Host "RECSYS_MODELS = '$($env:RECSYS_MODELS)' (empty = on-demand)" -ForegroundColor DarkGray
+
 # Use `python -m ...` so both run under the interpreter that has scikit-surprise
 # (the bare uvicorn/streamlit scripts may resolve to a different Python on PATH).
 Write-Host "Starting backend  -> http://localhost:8000  (docs at /docs)" -ForegroundColor Cyan
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
-    "Set-Location '$root'; `$env:PYTHONIOENCODING='utf-8'; python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"
+    "Set-Location '$root'; `$env:PYTHONIOENCODING='utf-8'; `$env:RECSYS_MODELS='$($env:RECSYS_MODELS)'; python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000"
 )
 
 Start-Sleep -Seconds 2

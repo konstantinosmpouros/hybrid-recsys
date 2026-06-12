@@ -136,8 +136,25 @@ python -m streamlit run app/app.py                 # UI       → http://localho
 
 > Use `python -m uvicorn` / `python -m streamlit` (not the bare `uvicorn`/`streamlit`
 > commands) so they run under the same interpreter that has `scikit-surprise` installed.
-> The backend lazy-loads ~8 GB of models on its first request, so the first
-> recommendation can take a minute.
+
+**Memory — on-demand loading.** Models load **only when you click "Load"** (sidebar
+or inline) — the backend boots with just the catalogue (~1 GB) and no models. This
+matters because the Surprise models are huge in RAM: **SVD ≈ 6.8 GB**, the k-NN
+models larger still (they retain the full 20M-rating trainset), while each content
+model is only ~0.3 GB. Load just the models you want to demo; recommend/predict
+endpoints return `409 {status: not_loaded}` until the chosen model is loaded.
+
+Optional startup preload via `RECSYS_MODELS` (default: none):
+
+```bash
+RECSYS_MODELS=          # default — preload nothing, load on demand
+RECSYS_MODELS=lite      # preload content models + LightGCN (~2 GB)
+RECSYS_MODELS=all       # preload everything (needs ~20 GB free)
+RECSYS_MODELS=svd,content_genome   # preload a custom set
+```
+
+The Comparison tab always shows metrics for all 12 (from `all_metrics.json`,
+independent of what's loaded).
 
 ### API
 

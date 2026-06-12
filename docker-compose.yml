@@ -7,6 +7,11 @@ services:
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8806:8000"   # host 8806 -> container 8000  (backend API + /docs)
+    environment:
+      # Startup PRELOAD set. Default (empty) = preload nothing — models load on
+      # demand when you click "Load" in the UI (recommended; keeps memory low).
+      # "lite" preloads content+LightGCN (~2 GB); "all" preloads everything (~20 GB).
+      - RECSYS_MODELS=
     volumes:
       - ./artifacts:/app/artifacts:ro
       - ./data:/app/data:ro

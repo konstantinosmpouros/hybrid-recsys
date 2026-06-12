@@ -6,7 +6,9 @@ needs: recommendations (with genre/year filters), cold-start recommendations fro
 an in-session ratings dict, per-model prediction inspection, "why this?"
 explanations, movie search and item-to-item similarity.
 """
+import gc
 import json
+import threading
 import numpy as np
 import pandas as pd
 from hybrid_recsys.config import DATA_PROCESSED, ARTIFACTS_METRICS, ARTIFACTS_MODELS
@@ -68,6 +70,88 @@ def static_model_info() -> list[dict]:
     return out
 
 
+# "lite" set — content models + LightGCN only (~2 GB total). Excludes EVERY
+# Surprise model: each keeps the full 20M-rating trainset in RAM as Python
+# objects, so the compact .joblib explodes on load — SVD alone ≈ 6.8 GB,
+# Weighted ≈ 7.2 GB (it embeds an SVD), and the kNN models are larger still.
+# Use RECSYS_MODELS=all only with lots of free RAM (≈ 20 GB for the full set).
+_LITE_MODELS = ["content", "content_genome", "content_embed", "lightgcn"]
+
+
+def _selected_models() -> set[str] | None:
+    """Models to PRELOAD at startup. Default is NONE — models load on demand when
+    the user clicks "Load" in the UI. `RECSYS_MODELS=all` preloads everything (≈20 GB),
+    `lite` preloads the content+LightGCN set, or pass a comma-separated list of keys."""
+    import os
+    val = os.environ.get("RECSYS_MODELS", "").strip().lower()
+    if val in ("", "none"):
+        return set()                      # preload nothing — pure on-demand
+    if val == "all":
+        return None                       # preload everything
+    if val == "lite":
+        return set(_LITE_MODELS)
+    return {k.strip() for k in val.split(",") if k.strip()}
+
+
+# Each model's atomic dependencies — what must be in memory for it to score.
+# (Loading "weighted" needs only its own self-contained joblib; "stacked"/"dual"
+# pull their base models in because the bundle builds their feature vectors.)
+_MODEL_DEPS: dict[str, list[str]] = {
+    "content": ["content"], "content_genome": ["content_genome"],
+    "content_embed": ["content_embed"], "svd": ["svd"],
+    "item_knn": ["item_knn"], "user_knn": ["user_knn"],
+    "lightgcn": ["lightgcn"], "weighted": ["weighted"],
+    "stacked": ["stacked", "content", "user_knn", "item_knn", "svd"],
+    "dual": ["dual", "content_genome", "user_knn", "item_knn", "svd", "lightgcn"],
+}
+
+# Approximate resident RAM per atomic model (GB), measured on this dataset. The
+# Surprise models are huge because they retain the full 20M-rating trainset.
+_ATOMIC_RAM_GB: dict[str, float] = {
+    "content": 0.4, "content_genome": 0.25, "content_embed": 0.45,
+    "svd": 6.9, "item_knn": 3.0, "user_knn": 3.5, "weighted": 7.2,
+    "stacked": 0.05, "lightgcn": 0.2, "dual": 0.05,
+}
+
+# A model is "heavy" if it costs more than this much RAM. This machine fits at
+# most ONE heavy model at a time, so loading any model first unloads every other
+# heavy model it doesn't itself depend on. Everything ≤ this stays resident and
+# coexists freely: the three content models (~0.3 GB each), LightGCN (~0.2 GB),
+# and the meta-learner heads. Heavy = the kNNs (~3 GB) and SVD/Weighted (~7 GB).
+_HEAVY_GB = 1.0
+
+
+def release_memory() -> None:
+    """Force-reclaim freed memory after unloading a model: run the GC and, if
+    torch happens to be loaded with CUDA, clear its cache. Serving is CPU-only,
+    so the CUDA call is purely defensive."""
+    gc.collect()
+    import sys
+    if "torch" in sys.modules:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def available_gb() -> float:
+    """Free RAM in GB, cgroup/container-aware (reads /proc/meminfo on Linux)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024 / 1024   # kB -> GB
+    except Exception:
+        pass
+    try:
+        import psutil
+        return psutil.virtual_memory().available / 1e9
+    except Exception:
+        return float("inf")
+
+
 class RecommenderBundle:
     """Loads all trained models + processed data and serves every API operation.
 
@@ -103,12 +187,13 @@ class RecommenderBundle:
         # readiness flags — load is split so the catalogue/search UI works within
         # seconds while the ~8 GB of models load separately (in a background thread).
         self.data_ready: bool = False
-        self.models_ready: bool = False
+        self.models_ready: bool = False         # True only when the full set is loaded
+        self._load_lock = threading.Lock()       # serialises on-demand model loads
 
     # ── loading ──────────────────────────────────────────────────────────────
     def load(self) -> "RecommenderBundle":
         self.load_data()
-        self.load_models()
+        self.load_models(only=None)
         return self
 
     def load_data(self) -> "RecommenderBundle":
@@ -119,18 +204,95 @@ class RecommenderBundle:
         self.data_ready = True
         return self
 
-    def load_models(self) -> "RecommenderBundle":
-        """Slow (~minutes, ~8 GB): the 12 trained models. Needed for recommend /
-        predict / explain / item-similarity."""
-        self.cb = ContentBasedRecommender.load()
-        self.svd = SVDModel.load()
-        self.item_knn = ItemKNNModel.load()
-        self.user_knn = UserKNNModel.load()
-        self.weighted = WeightedHybrid.load()
-        self.stacked = StackedHybrid.load()
-        self._load_extensions()
-        self.models_ready = True
+    def load_models(self, only: set[str] | None = None) -> "RecommenderBundle":
+        """Preload a set of models (used at startup only when RECSYS_MODELS is set).
+        `only=None` → everything; otherwise the given keys. Day-to-day the app
+        loads each model lazily via `ensure_model` when the user clicks "Load"."""
+        keys = list(MODEL_REGISTRY) if only is None else list(only)
+        for k in keys:
+            self.ensure_model(k)
+        if only is None:
+            self.models_ready = True
         return self
+
+    def _load_one(self, key: str) -> None:
+        """Load a single atomic model object if not already in memory."""
+        if key == "content" and self.cb is None:
+            self.cb = ContentBasedRecommender.load()
+        elif key == "svd" and self.svd is None:
+            self.svd = SVDModel.load()
+        elif key == "item_knn" and self.item_knn is None:
+            self.item_knn = ItemKNNModel.load()
+        elif key == "user_knn" and self.user_knn is None:
+            self.user_knn = UserKNNModel.load()
+        elif key == "weighted" and self.weighted is None:
+            self.weighted = WeightedHybrid.load()
+        elif key == "stacked" and self.stacked is None:
+            self.stacked = StackedHybrid.load()
+        elif key == "content_genome" and self.cb_genome is None:
+            self.cb_genome = ContentBasedRecommender.load(path=ARTIFACTS_MODELS / "content_genome_model.joblib")
+        elif key == "content_embed" and self.cb_embed is None:
+            self.cb_embed = ContentBasedRecommender.load(path=ARTIFACTS_MODELS / "content_embed_model.joblib")
+        elif key == "lightgcn" and self.lightgcn is None:
+            self.lightgcn = LightGCNRecommender.load()
+        elif key == "dual" and self.dual is None:
+            self.dual = DualHeadHybrid.load()
+
+    def ensure_model(self, key: str) -> bool:
+        """Load `key` (and the base models it depends on) on demand. Thread-safe;
+        a no-op if already loaded. Returns True if the model is usable afterwards."""
+        if key not in MODEL_REGISTRY:
+            raise ValueError(f"Unknown model '{key}'.")
+        with self._load_lock:
+            for dep in _MODEL_DEPS.get(key, [key]):
+                self._load_one(dep)
+        return key in self.loaded_models()
+
+    def loaded_models(self) -> set[str]:
+        """Model keys currently in memory and ready to score."""
+        return set(self._build_dispatch(-1, {}).keys())
+
+    _ATTR = {"content": "cb", "svd": "svd", "item_knn": "item_knn", "user_knn": "user_knn",
+             "weighted": "weighted", "stacked": "stacked", "content_genome": "cb_genome",
+             "content_embed": "cb_embed", "lightgcn": "lightgcn", "dual": "dual"}
+
+    def _atomic_loaded(self, dep: str) -> bool:
+        return getattr(self, self._ATTR.get(dep, dep), None) is not None
+
+    def estimate_load_gb(self, key: str) -> float:
+        """Extra RAM (GB) that loading `key` would add — sum of its not-yet-loaded
+        atomic dependencies. ~0 if already loaded."""
+        return round(sum(_ATOMIC_RAM_GB.get(d, 0.0)
+                         for d in _MODEL_DEPS.get(key, [key]) if not self._atomic_loaded(d)), 2)
+
+    def total_ram_gb(self, key: str) -> float:
+        """Full RAM (GB) the model occupies once loaded (all deps)."""
+        return round(sum(_ATOMIC_RAM_GB.get(d, 0.0) for d in _MODEL_DEPS.get(key, [key])), 2)
+
+    def _evictable_for(self, key: str) -> list[str]:
+        """Loaded heavy (> _HEAVY_GB) atomic models that `key` does NOT need —
+        these get unloaded before `key` loads, so only one heavy model is ever
+        resident at a time (the small models, which always stay, are excluded)."""
+        required = set(_MODEL_DEPS.get(key, [key]))
+        return [d for d in self._ATTR
+                if d not in required and self._atomic_loaded(d)
+                and _ATOMIC_RAM_GB.get(d, 0) > _HEAVY_GB]
+
+    def freeable_gb(self, key: str) -> float:
+        """RAM (GB) we could free for `key` by unloading other large models."""
+        return round(sum(_ATOMIC_RAM_GB.get(d, 0) for d in self._evictable_for(key)), 2)
+
+    def evict_for(self, key: str) -> list[str]:
+        """Unload every heavy model `key` doesn't need (the small models stay), so
+        only one heavy model is ever resident. Returns the labels unloaded."""
+        freed = []
+        with self._load_lock:
+            for d in self._evictable_for(key):
+                setattr(self, self._ATTR[d], None)
+                freed.append(self.label(d))
+            if freed:
+                release_memory()
+        return freed
 
     @staticmethod
     def _try(fn):
@@ -138,14 +300,6 @@ class RecommenderBundle:
             return fn()
         except Exception:
             return None
-
-    def _load_extensions(self) -> None:
-        self.cb_genome = self._try(
-            lambda: ContentBasedRecommender.load(path=ARTIFACTS_MODELS / "content_genome_model.joblib"))
-        self.cb_embed = self._try(
-            lambda: ContentBasedRecommender.load(path=ARTIFACTS_MODELS / "content_embed_model.joblib"))
-        self.lightgcn = self._try(lambda: LightGCNRecommender.load())
-        self.dual = self._try(lambda: DualHeadHybrid.load())
 
     def _load_data(self) -> None:
         # Movie metadata lookups for filters / display.
@@ -203,21 +357,28 @@ class RecommenderBundle:
         def dual_predict(m):
             return self.dual.predict_rating_one(self._dual_feats(user_id, user_ratings, m))
 
-        dispatch = {
-            "content":  lambda m: self.cb.predict(user_ratings, m),
-            "svd":      lambda m: self.svd.predict(user_id, m),
-            "item_knn": lambda m: self.item_knn.predict(user_id, m),
-            "user_knn": lambda m: self.user_knn.predict(user_id, m),
-            "weighted": lambda m: self.weighted.predict(user_id, m, user_ratings),
-            "stacked":  stacked_predict,
-        }
+        # Only expose a model whose object(s) actually loaded — so `lite` mode
+        # (or any RECSYS_MODELS subset) doesn't advertise models it can't score.
+        dispatch = {}
+        if self.cb is not None:
+            dispatch["content"] = lambda m: self.cb.predict(user_ratings, m)
+        if self.svd is not None:
+            dispatch["svd"] = lambda m: self.svd.predict(user_id, m)
+        if self.item_knn is not None:
+            dispatch["item_knn"] = lambda m: self.item_knn.predict(user_id, m)
+        if self.user_knn is not None:
+            dispatch["user_knn"] = lambda m: self.user_knn.predict(user_id, m)
+        if self.weighted is not None:
+            dispatch["weighted"] = lambda m: self.weighted.predict(user_id, m, user_ratings)
+        if self.stacked is not None and None not in (self.cb, self.user_knn, self.item_knn, self.svd):
+            dispatch["stacked"] = stacked_predict
         if self.cb_genome is not None:
             dispatch["content_genome"] = lambda m: self.cb_genome.predict(user_ratings, m)
         if self.cb_embed is not None:
             dispatch["content_embed"] = lambda m: self.cb_embed.predict(user_ratings, m)
         if self.lightgcn is not None:
             dispatch["lightgcn"] = lambda m: self.lightgcn.predict(user_id, m)
-        if self.dual is not None and self.cb_genome is not None and self.lightgcn is not None:
+        if self.dual is not None and None not in (self.cb_genome, self.lightgcn, self.user_knn, self.item_knn, self.svd):
             dispatch["dual"] = dual_predict
         return dispatch
 
@@ -233,12 +394,15 @@ class RecommenderBundle:
         return [k for k in MODEL_REGISTRY if k in present]
 
     def model_info(self) -> list[dict]:
-        avail = set(self.available_models())
+        """Per-model: `available` = artifact on disk (loadable), `loaded` = in RAM now."""
+        loaded = self.loaded_models()
+        on_disk = {m["key"]: m["available"] for m in static_model_info()}
         out = []
         for k, (label, family, ranking_only, cold_start) in MODEL_REGISTRY.items():
             out.append({"key": k, "label": label, "family": family,
                         "ranking_only": ranking_only, "cold_start": cold_start,
-                        "available": k in avail})
+                        "available": on_disk.get(k, False), "loaded": k in loaded,
+                        "ram_gb": self.total_ram_gb(k)})
         return out
 
     @staticmethod
