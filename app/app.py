@@ -63,6 +63,22 @@ def api_post(path: str, payload: dict):
     return _request("POST", path, json=payload)
 
 
+def api_get_bytes(path: str) -> bytes | None:
+    """Fetch raw bytes (e.g. a figure PNG) through the backend, server-side.
+
+    Static figures are served by the backend at /figures/*. We must NOT hand that
+    URL straight to st.image(): Streamlit would emit an <img src> the *browser*
+    loads, and the browser cannot reach the backend host the Streamlit server uses
+    (e.g. http://backend:8000 inside Docker). Fetching here and passing the bytes
+    means the browser never needs to reach the backend."""
+    try:
+        r = requests.get(f"{BACKEND}{path}", timeout=600)
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        return None
+
+
 def get_health():
     return api_get("/api/health")
 
@@ -683,10 +699,18 @@ with tab_compare:
 
         st.subheader("Deep-evaluation figures")
         names = get_figures().get("figures", [])
-        deep = [n for n in names if any(t in n for t in
-                ("ndcg", "auc", "segmented", "beyond", "bootstrap", "rating_vs_ranking", "f1_curves"))]
+        # Prefer the notebook-14 numbered figures; drop the older standalone `eval_*`
+        # duplicates so the picker isn't cluttered with near-identical charts.
+        deep = [n for n in names
+                if not n.startswith("eval_")
+                and any(t in n for t in ("ndcg", "auc", "segmented", "beyond",
+                                         "bootstrap", "rating_vs_ranking", "f1_curves"))]
         if deep:
             for n in st.multiselect("Show figures", deep, default=deep[:2], key="cmp_figs"):
-                st.image(f"{BACKEND}/figures/{n}.png", caption=n, use_container_width=True)
+                img = api_get_bytes(f"/figures/{n}.png")
+                if img:
+                    st.image(img, caption=n, use_container_width=True)
+                else:
+                    st.caption(f"⚠️ couldn't load figure '{n}'")
         else:
             st.caption("Run 14_advanced_eval to generate the deep-eval figures.")
